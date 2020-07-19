@@ -1,0 +1,82 @@
+<link rel="stylesheet" href="css/geral.css">
+<link rel="stylesheet" href="css/galeria.css">
+
+<img id="background" src="img/index/cover2.jpg" />
+
+<div class="container">
+  <header>
+    <div align="center">
+      <a id="logo" href="index.html">
+        <img src="img/index/logo.png" title="CVU" />
+      </a>
+    </div>
+  </header>
+
+  <main>
+    <div class="row">
+      <div class="column">
+        <img src="img/galeria/1.jpg">
+        <img src="img/galeria/10.webp">
+        <img src="img/galeria/5.webp">
+        <img src="img/galeria/1.jpg">
+      </div>
+      <div class="column">
+        <img src="img/galeria/2.jpg">
+        <img src="img/galeria/6.webp">
+        <img src="img/galeria/3.jpg">
+      </div>
+      <div class="column">
+        <img src="img/galeria/3.jpg">
+        <img src="img/galeria/5.webp">
+        <img src="img/galeria/10.webp">
+      </div>
+      <div class="column">
+        <img src="img/galeria/10.webp">
+        <img src="img/galeria/4.jpg">
+        <img src="img/galeria/5.webp">
+        <img src="img/galeria/6.webp">
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <img src="img/index/support.png" title="Fale com o CVU" />
+    <span style="font-weight: bold">Email:</span>
+     <span style="user-select: all; cursor: pointer;">cvufca@unicamp.br</span>
+  </footer>
+</div>
+
+<div id="div_imagem">
+  <div id="overlay">
+  </div>
+  <img id="img_expandida" />
+</div>
+
+<script>
+  var imagens = document.querySelectorAll('.column img');
+  var div_imagem = document.getElementById('div_imagem');
+  var img_expandida = document.getElementById('img_expandida');
+  var overlay = document.getElementById('overlay');
+  var mostrando;
+
+  for(var i=0; i<imagens.length; i++)
+  {
+    imagens[i].onclick = function () {
+      img_expandida.src = this.src;
+      div_imagem.style.display = 'block';
+    };
+  }
+
+  function esconder_imagem() {
+    div_imagem.style.display = 'none';
+  }
+
+  overlay.onclick = esconder_imagem;
+
+  document.onkeydown = function (e) {
+   if(e.key === "Escape") {
+       esconder_imagem();
+   }
+  };
+
+</script>
