@@ -8,53 +8,60 @@ img#background {
   z-index: -1;
 }
 
-table {
+table#tabela_principal {
   z-index: 1;
 }
 
-td {
-  padding-left: 40px;
-  padding-right: 40px;
-  padding-top: 5px;
-  padding-bottom: 5px;
+table#tabela_principal td {
+  padding-left: 5vw;
+  padding-right: 5vw;
+  padding-top: 1vh;
+  padding-bottom: 1vh;
+  text-align: center;
 }
 
-td img {
-  width: 128px;
+table#tabela_principal td img {
   transition: transform .6s;
 }
 
-td img:hover {
+table#tabela_principal td img:hover {
   transform: scale(1.5);
 }
 
-td {
-  text-align: center;
+@media (orientation: landscape) {
+
+  table#tabela_principal td img {
+    width: 128px;
+  }
+
+  footer img {
+    display: inline-block;
+    width: 80px;
+    padding: 4px;
+  }
+}
+
+@media (orientation: portrait) {
+
+  table#tabela_principal td img {
+    width: 32vw;
+  }
+
+  .col-rodape {
+
+  }
+
+  footer img {
+    display: inline-block;
+    width: 18vw;
+    padding: 4px;
+    width: 18vw;
+  }
 }
 
 footer {
-  margin: 15px;
+  margin: 5px;
   text-align: center;
-}
-
-.col-rodape {
-  display: inline-block;
-  width: 100px;
-  padding: 4px;
-}
-
-.col-rodape img {
-  max-width: 80px;
-}
-
-@media screen and (max-width: 600px) {
-  .col-rodape {
-    width: 40vw;
-  }
-
-  .col-rodape img {
-    max-width: 35vw;
-  }
 }
 
 /* FLEX */
@@ -97,10 +104,6 @@ main {
   .column {
     flex: 50%;
     max-width: 50%;
-  }
-
-  td img {
-    width: 32vw;
   }
 }
 
