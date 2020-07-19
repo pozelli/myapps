@@ -57,18 +57,22 @@
   var div_imagem = document.getElementById('div_imagem');
   var img_expandida = document.getElementById('img_expandida');
   var overlay = document.getElementById('overlay');
-  var mostrando;
+  var mostrando=0, atual;
 
   for(var i=0; i<imagens.length; i++)
   {
+    imagens[i].setAttribute('data-number', i);
     imagens[i].onclick = function () {
       img_expandida.src = this.src;
       div_imagem.style.display = 'block';
+      mostrando = 1;
+      atual = parseInt(this.getAttribute('data-number'));
     };
   }
 
   function esconder_imagem() {
     div_imagem.style.display = 'none';
+    mostrando = 0;
   }
 
   overlay.onclick = esconder_imagem;
@@ -77,6 +81,21 @@
    if(e.key === "Escape") {
        esconder_imagem();
    }
+
+   if (mostrando==1){
+     if(e.keyCode == '37') {
+       atual = atual - 1;
+       if (atual<0) {
+         atual = imagens.length-1;
+       }
+       img_expandida.src = imagens[atual].src;
+     }
+     if(e.keyCode == '39') {
+       atual = (atual + 1) % imagens.length;
+       img_expandida.src = imagens[atual].src;
+     }
+   }
+
   };
 
 </script>
