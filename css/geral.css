@@ -20,7 +20,8 @@ td {
 }
 
 td img {
-  max-width: 40vw;
+  width: 40vw;
+  max-width: 128px;
   transition: transform .6s;
 }
 
