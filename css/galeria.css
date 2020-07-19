@@ -1,0 +1,31 @@
+#div_imagem {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: none;
+  text-align: center;
+}
+
+#overlay {
+  cursor: pointer;
+  position: absolute;
+  background-color: black;
+  opacity: 0.8;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9;
+}
+
+img#img_expandida {
+  position: relative;
+  top: 8vh;
+
+  width: auto;
+  height: auto;
+  max-width: 92vw;
+  max-height: 90vh;
+
+  z-index: 10;
+}
