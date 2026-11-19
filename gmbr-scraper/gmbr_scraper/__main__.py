@@ -17,7 +17,13 @@ from .storage import Storage
 def cmd_crawl(args):
     db = Storage(args.db)
     cookie = args.cookie or os.environ.get("GMBR_COOKIE")
-    crawler = Crawler(db, Fetcher(delay=args.delay, cookie=cookie))
+    fetcher = Fetcher(delay=args.delay, cookie=cookie)
+    user = os.environ.get("GMBR_USER")
+    password = os.environ.get("GMBR_PASS")
+    if user and password and not fetcher.login(user, password):
+        db.close()
+        sys.exit(1)
+    crawler = Crawler(db, fetcher)
     try:
         crawler.run(
             forum_ids=args.forum, topic_ids=args.topic,

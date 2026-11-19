@@ -47,6 +47,7 @@ Opções úteis do `crawl`:
 | `--skip-listing` | não relista fóruns; só raspa tópicos pendentes já no banco |
 | `--refresh` | raspa de novo todos os tópicos desde a 1ª página |
 | `--cookie "..."` / `GMBR_COOKIE` | cookie de uma sessão logada (ver abaixo) |
+| `GMBR_USER` + `GMBR_PASS` | faz login antes de raspar (ver abaixo) |
 | `--db arquivo.sqlite` | banco a usar (opção global, vem antes do comando) |
 
 ### Execuções incrementais
@@ -80,9 +81,17 @@ Tabelas (e arquivos do `export`):
   bloqueia `/u`). Por isso os membros são identificados pelo **nome**, e os
   dados de perfil vêm do bloco ao lado das mensagens — que mostra o estado
   **atual** do membro. Membros que nunca postaram não aparecem.
-- Com `--cookie` de uma sessão logada, as mensagens passam a trazer o link
-  `/uNN` e o scraper preenche `user_id`/`profile_url` (não testado sem
-  credenciais; o scraper não acessa as páginas `/u`).
+- **Com login**, as mensagens trazem o link `/uNN` e o scraper preenche
+  `author_id` nas mensagens e `user_id`/`profile_url` nos membros (o scraper
+  continua sem acessar as páginas `/u`). Duas formas:
+
+  ```bash
+  GMBR_USER=usuario GMBR_PASS=senha python -m gmbr_scraper crawl
+  GMBR_COOKIE="fa_gmbr_forumeiros_com_data=...; fa_gmbr_forumeiros_com_sid=..." \
+      python -m gmbr_scraper crawl
+  ```
+
+  Nunca coloque credenciais/cookies em arquivos versionados.
 - Mensagens de visitantes e de contas excluídas aparecem como **Convidado**
   (`is_guest = 1`) — todas agrupadas sob esse nome.
 - Se um membro mudou de nome, as mensagens antigas aparecem com o nome novo

@@ -34,9 +34,29 @@ class Fetcher:
         if cookie:
             # Cookie de uma sessão logada (copiado do navegador), opcional.
             # Com login, as mensagens trazem links /uNN e os IDs dos membros.
-            self.session.headers["Cookie"] = cookie
+            # Vai para o cookie jar (e não para o cabeçalho), senão o requests
+            # descarta o cookie ao seguir redirecionamentos.
+            for part in cookie.split(";"):
+                if "=" in part:
+                    k, v = part.strip().split("=", 1)
+                    self.session.cookies.set(k, v, domain=parser.BASE_URL.split("//")[1])
         self._last = 0.0
         self.requests_made = 0
+
+    def login(self, username: str, password: str) -> bool:
+        """Inicia sessão no fórum; os cookies ficam na sessão HTTP."""
+        self.get("/login")
+        r = self.session.post(parser.abs_url("/login"), timeout=self.timeout, data={
+            "username": username, "password": password, "autologin": "on",
+            "redirect": "", "query": "", "login": "Iniciar sessão",
+        })
+        self._last = time.monotonic()
+        ok = r.status_code == 200 and "/login?logout" in self.get("/")
+        if ok:
+            log.info("Login como %s OK", username)
+        else:
+            log.error("Falha no login como %s", username)
+        return ok
 
     def get(self, path_or_url: str) -> str:
         url = parser.abs_url(path_or_url)
