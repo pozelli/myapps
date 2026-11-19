@@ -1,0 +1,7 @@
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+export/
+avatars/
+__pycache__/
