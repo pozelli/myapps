@@ -42,23 +42,35 @@ class Fetcher:
                     self.session.cookies.set(k, v, domain=parser.BASE_URL.split("//")[1])
         self._last = 0.0
         self.requests_made = 0
+        self.credentials: tuple[str, str] | None = None
+        self.expect_logged_in = bool(cookie)
 
     def login(self, username: str, password: str) -> bool:
         """Inicia sessão no fórum; os cookies ficam na sessão HTTP."""
-        self.get("/login")
+        self.get("/login", check_session=False)
         r = self.session.post(parser.abs_url("/login"), timeout=self.timeout, data={
             "username": username, "password": password, "autologin": "on",
             "redirect": "", "query": "", "login": "Iniciar sessão",
         })
         self._last = time.monotonic()
-        ok = r.status_code == 200 and "/login?logout" in self.get("/")
+        ok = r.status_code == 200 and "/login?logout" in self.get("/", check_session=False)
         if ok:
+            self.credentials = (username, password)
+            self.expect_logged_in = True
             log.info("Login como %s OK", username)
         else:
             log.error("Falha no login como %s", username)
         return ok
 
-    def get(self, path_or_url: str) -> str:
+    def get(self, path_or_url: str, check_session: bool = True) -> str:
+        text = self._get(path_or_url)
+        if check_session and self.expect_logged_in and "/login?logout" not in text:
+            log.warning("Sessão de login expirou em %s", path_or_url)
+            if self.credentials and self.login(*self.credentials):
+                text = self._get(path_or_url)
+        return text
+
+    def _get(self, path_or_url: str) -> str:
         url = parser.abs_url(path_or_url)
         for attempt in range(1, self.retries + 1):
             wait = self.delay - (time.monotonic() - self._last)
@@ -202,7 +214,8 @@ class Crawler:
 
     def run(self, forum_ids: list[int] | None = None, topic_ids: list[int] | None = None,
             skip_listing: bool = False, refresh: bool = False,
-            max_topics: int | None = None, max_forum_pages: int | None = None):
+            max_topics: int | None = None, max_forum_pages: int | None = None,
+            shard: tuple[int, int] | None = None):
         if topic_ids:
             for tid in topic_ids:
                 self.db.ensure_topic(tid)
@@ -210,12 +223,14 @@ class Crawler:
             return
 
         if not skip_listing:
-            all_forums = self.discover_forums()
+            known = [r["id"] for r in self.db.forums()]
+            # Com --forum e fóruns já conhecidos, não refaz a descoberta
+            all_forums = known if (forum_ids and known) else self.discover_forums()
             targets = forum_ids or all_forums
             for fid in targets:
                 self.list_forum_topics(fid, max_pages=max_forum_pages)
 
-        pending = self.db.topics_to_scrape(forum_ids, refresh=refresh)
+        pending = self.db.topics_to_scrape(forum_ids, refresh=refresh, shard=shard)
         if max_topics:
             pending = pending[:max_topics]
         log.info("%d tópicos para raspar", len(pending))

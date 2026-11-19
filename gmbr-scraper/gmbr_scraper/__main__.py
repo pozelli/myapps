@@ -14,6 +14,16 @@ from .crawler import Crawler, Fetcher
 from .storage import Storage
 
 
+def _parse_shard(value: str | None):
+    """"2/5" -> (2, 5): só tópicos com id % 5 == 2."""
+    if not value:
+        return None
+    i, n = (int(x) for x in value.split("/"))
+    if not 0 <= i < n:
+        raise SystemExit("--shard deve ser I/N com 0 <= I < N")
+    return i, n
+
+
 def cmd_crawl(args):
     db = Storage(args.db)
     cookie = args.cookie or os.environ.get("GMBR_COOKIE")
@@ -29,6 +39,7 @@ def cmd_crawl(args):
             forum_ids=args.forum, topic_ids=args.topic,
             skip_listing=args.skip_listing, refresh=args.refresh,
             max_topics=args.max_topics, max_forum_pages=args.max_forum_pages,
+            shard=_parse_shard(args.shard),
         )
     except KeyboardInterrupt:
         logging.warning("Interrompido — progresso salvo; rode de novo para continuar.")
@@ -144,6 +155,8 @@ def main(argv=None):
                    help="raspa de novo todos os tópicos desde a 1ª página")
     c.add_argument("--max-topics", type=int, help="limita nº de tópicos (testes)")
     c.add_argument("--max-forum-pages", type=int, help="limita páginas de listagem por fórum")
+    c.add_argument("--shard", metavar="I/N",
+                   help="divide os tópicos entre N processos; este pega id %% N == I")
     c.add_argument("--cookie", help="cabeçalho Cookie de uma sessão logada (ou GMBR_COOKIE)")
     c.set_defaults(func=cmd_crawl)
 

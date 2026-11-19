@@ -117,9 +117,11 @@ def now_iso() -> str:
 
 class Storage:
     def __init__(self, path: str):
-        self.conn = sqlite3.connect(path)
+        # timeout alto: vários processos podem gravar no mesmo banco
+        self.conn = sqlite3.connect(path, timeout=300)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=300000")
         self.conn.executescript(SCHEMA)
 
     def commit(self):
@@ -180,7 +182,8 @@ class Storage:
     def get_topic(self, topic_id: int):
         return self.conn.execute("SELECT * FROM topics WHERE id=?", (topic_id,)).fetchone()
 
-    def topics_to_scrape(self, forum_ids: list[int] | None = None, refresh: bool = False):
+    def topics_to_scrape(self, forum_ids: list[int] | None = None, refresh: bool = False,
+                         shard: tuple[int, int] | None = None):
         """Tópicos pendentes: nunca concluídos, ou com novas respostas desde o crawl."""
         sql = "SELECT * FROM topics"
         cond, args = [], []
@@ -192,6 +195,9 @@ class Storage:
         if forum_ids:
             cond.append(f"forum_id IN ({','.join('?' * len(forum_ids))})")
             args += forum_ids
+        if shard:
+            cond.append("id % ? = ?")
+            args += [shard[1], shard[0]]
         if cond:
             sql += " WHERE " + " AND ".join(cond)
         sql += " ORDER BY id"
