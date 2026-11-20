@@ -12,6 +12,8 @@ DB=data/gmbr.sqlite
 LOGS=data/logs
 mkdir -p "$LOGS"
 
+DONE1="$LOGS/extras_fase1.ok"  # apague para refazer a fase 1
+if [ ! -f "$DONE1" ]; then
 # Divide as páginas de listagem (30 tópicos) e da lista de membros (30 membros)
 # em N filas de tamanho parecido; cada linha é um comando do gmbr_scraper.
 python3 - "$DB" "$N" "$LOGS" <<'PY'
@@ -62,6 +64,8 @@ for i in $(seq "$N"); do
   sleep 15
 done
 wait
+touch "$DONE1"
+fi
 
 echo "$(date +%H:%M:%S) fase 2 (enquetes + perfis)"
 for i in $(seq "$N"); do
