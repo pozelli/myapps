@@ -55,6 +55,22 @@ def cmd_discover(args):
         db.close()
 
 
+def cmd_list_pages(args):
+    db = Storage(args.db)
+    try:
+        Crawler(db, _make_fetcher(args)).list_forum_pages(args.forum, args.first, args.last)
+    finally:
+        db.close()
+
+
+def cmd_mark_listed(args):
+    db = Storage(args.db)
+    for fid in args.forum:
+        n = db.conn.execute("SELECT COUNT(*) FROM topics WHERE forum_id=?", (fid,)).fetchone()[0]
+        db.mark_forum_scraped(fid, n)
+    db.close()
+
+
 def cmd_crawl(args):
     db = Storage(args.db)
     cookie = args.cookie or os.environ.get("GMBR_COOKIE")
@@ -213,6 +229,19 @@ def main(argv=None):
     d.add_argument("--delay", type=float, default=1.0)
     d.add_argument("--cookie")
     d.set_defaults(func=cmd_discover)
+
+    lp = sub.add_parser("list-pages",
+                        help="lista só um intervalo de páginas de um fórum (por offset)")
+    lp.add_argument("--forum", type=int, required=True)
+    lp.add_argument("--first", type=int, required=True, help="offset inicial (ex.: 3210)")
+    lp.add_argument("--last", type=int, required=True, help="offset final, inclusive")
+    lp.add_argument("--delay", type=float, default=1.0)
+    lp.add_argument("--cookie")
+    lp.set_defaults(func=cmd_list_pages)
+
+    ml = sub.add_parser("mark-listed", help="marca a listagem de fóruns como concluída")
+    ml.add_argument("--forum", type=int, action="append", required=True)
+    ml.set_defaults(func=cmd_mark_listed)
 
     pr = sub.add_parser("plan-ranges",
                         help="divide os tópicos pendentes em N faixas de ID equilibradas")

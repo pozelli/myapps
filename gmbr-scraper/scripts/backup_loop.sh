@@ -86,6 +86,6 @@ Claude-Session: https://claude.ai/code/session_01B43M86Mv3rBLhkbSg9CfsN"
 [ -s "$KEY" ] || { log "ERROR backup: senha $KEY não encontrada"; exit 1; }
 while :; do
   backup_once || log "ERROR backup falhou (ver linhas acima)"
-  pgrep -f "gmbr_scraper --db $DB crawl" >/dev/null || { backup_once; log "INFO backup final; workers terminaram"; break; }
+  pgrep -f "gmbr_scraper --db $DB (crawl|list-pages|mark-listed|plan-ranges)" >/dev/null || { backup_once; log "INFO backup final; workers terminaram"; break; }
   sleep "$INTERVAL"
 done

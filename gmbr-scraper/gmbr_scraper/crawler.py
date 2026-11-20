@@ -201,6 +201,27 @@ class Crawler:
             self.db.commit()
         return total
 
+    def list_forum_pages(self, forum_id: int, first: int, last: int) -> int:
+        """Lista só as páginas com offset entre first e last (inclusive).
+
+        Serve para dividir a listagem de um fórum grande entre processos. Não
+        marca a listagem do fórum como concluída (use `mark-listed`)."""
+        forum = self.db.get_forum(forum_id)
+        base = forum["url"] if forum and forum["url"] else f"/f{forum_id}-"
+        start, total = first, 0
+        while start <= last:
+            data = parser.parse_forum_page(
+                self.http.get(_page_path(base, "f", forum_id, start)), forum_id)
+            for t in data["topics"]:
+                self.db.upsert_topic_listing(t)
+            self.db.commit()
+            total += len(data["topics"])
+            log.info("Fórum %d: start=%d → %d tópicos", forum_id, start, len(data["topics"]))
+            if not data["topics"] or start >= data["last_offset"]:
+                break
+            start += data["page_step"] or 30
+        return total
+
     # ----------------------------------------------------------------- tópicos
     def scrape_topic(self, topic_id: int, full: bool = False) -> int:
         """Raspa um tópico página por página. Retorna nº de mensagens gravadas.
