@@ -212,13 +212,23 @@ def parse_forum_page(html: str, forum_id: int) -> dict:
             "section": None,
             "last_post_avatar": None,
             "last_post_id": None,
+            "prefix": None,      # ex.: "[Votação]" (tópico com enquete)
+            "topic_type": None,  # ícone da listagem
         }
         if row is not None:
             by = row.select_one(".span-tab strong, .span-tab a, .topic-author")
             if by:
                 topic["author_name"] = _clean(by.get_text(" "))
+            icon = row.select_one("dl.icon")
+            m_icon = re.search(r"/([a-z_]+)\.(?:gif|png)", (icon.get("style") or "") if icon else "")
+            if m_icon:
+                # topic_read, topic_read_hot, topic_read_locked, sticky_read, announce_read...
+                topic["topic_type"] = m_icon.group(1)
             dterm = row.select_one("dd.dterm")
             if dterm:
+                prefix = dterm.find("strong", recursive=False)
+                if prefix:
+                    topic["prefix"] = _clean(prefix.get_text(" ")) or None
                 # Descrição/subtítulo: texto solto entre o título e o "por"
                 desc = [_clean(t) for t in dterm.find_all(string=True, recursive=False)]
                 desc = [d for d in desc if d]
@@ -500,12 +510,142 @@ def parse_topic_page(html: str, topic_id: int, now: datetime | None = None) -> d
     crumbs = parse_breadcrumb_forums(soup)
     return {
         "title": topic_title,
+        "poll": parse_poll(soup),
         "posts": posts,
         "page_step": step,
         "last_offset": last_offset,
         "forum_id": crumbs[-1]["id"] if crumbs else None,
         "breadcrumb": crumbs,
     }
+
+
+def parse_poll(soup: BeautifulSoup) -> dict | None:
+    """Enquete do tópico (só aparece na 1ª página)."""
+    fs = soup.select_one("fieldset.polls")
+    if fs is None:
+        return None
+    box = fs.find_parent("div", class_="content") or fs.parent
+    q = box.find("h2") if box else None
+    options, total, closed = [], None, False
+    for dl in fs.find_all(["dl", "d1"]):
+        label = dl.find("label")
+        dds = dl.find_all("dd")
+        text = _clean(dl.get_text(" "))
+        if label:
+            pct = votes = None
+            for dd in dds:
+                t = _clean(dd.get_text(" "))
+                m = re.search(r"\[\s*(\d+)\s*\]", t)
+                if m:
+                    votes = int(m.group(1))
+                m = re.search(r"(\d+(?:[.,]\d+)?)\s*%", t)
+                if m and pct is None:
+                    pct = float(m.group(1).replace(",", "."))
+            radio = dl.find("input")
+            options.append({"text": _clean(label.get_text(" ")), "votes": votes,
+                            "percent": pct,
+                            "option_value": radio.get("value") if radio else None})
+        elif "Total de votos" in text:
+            total = _int(text.split(":")[-1])
+        elif "encerrad" in text.lower():
+            closed = True
+    return {"question": _clean(q.get_text(" ")) if q else None, "options": options,
+            "total_votes": total, "closed": closed}
+
+
+# --------------------------------------------------------------------------
+# Lista de membros e perfis
+# --------------------------------------------------------------------------
+def parse_memberlist_page(html: str) -> dict:
+    """Uma página de /memberlist (30 membros por página)."""
+    soup = soup_of(html)
+    members = []
+    for tr in soup.select("table tr"):
+        tds = tr.find_all("td")
+        if len(tds) < 6:
+            continue
+        a = tds[1].find("a", href=_USER_HREF_RE)
+        if not a:
+            continue
+        img = a.find("img")
+        www = tds[7].find("a") if len(tds) > 7 else None
+        joined = _clean(tds[3].get_text(" ")) or None
+        last = _clean(tds[4].get_text(" ")) or None
+        members.append({
+            "user_id": int(_USER_HREF_RE.match(a["href"]).group(1)),
+            "name": _clean(a.get_text(" ")),
+            "profile_url": abs_url(a["href"]),
+            "avatar_url": abs_url(img["src"]) if img and img.get("src") else None,
+            "humor": _clean(tds[2].get_text(" ")) or None,
+            "joined_raw": joined, "joined_date": parse_date(joined),
+            "last_visit_raw": last, "last_visit": parse_date(last),
+            "post_count": _int(tds[5].get_text(" ")),
+            "website": www.get("href") if www else None,
+        })
+    offsets = [int(x) for x in re.findall(r"/memberlist\?[^\"']*?start=(\d+)", html)]
+    return {"members": members, "last_offset": max(offsets, default=0)}
+
+
+# Rótulos do perfil que não guardamos (ações/contato, não dados do membro)
+_PROFILE_SKIP = ("Mensagem privada", "Mensagens privadas", "Contactar por e-mail",
+                 "Amigo(a)s e ignorados", "Gerenciar membro", "Encontrar todas")
+
+
+def parse_profile_page(html: str, user_id: int) -> dict:
+    """Página /uNN: todos os campos visíveis do perfil."""
+    soup = soup_of(html)
+    main = soup.select_one("#main-content") or soup
+    out: dict = {"user_id": user_id, "fields": {}, "groups": [], "images": []}
+    h1 = main.select_one("h1.page-title")
+    out["name"] = None
+    out["color"] = None
+    if h1:
+        out["name"] = _clean(h1.get_text(" ")).removeprefix("Perfil de").strip() or None
+        span = h1.find("span", style=True)
+        m = re.search(r"color:\s*(#[0-9a-fA-F]{3,6})", span["style"]) if span else None
+        out["color"] = m.group(1) if m else None
+    for dl in main.select("dl"):
+        for dt in dl.find_all("dt", recursive=False):
+            label = _clean(dt.get_text(" ")).rstrip(":* ").strip()
+            dd = dt.find_next_sibling("dd")
+            if not label or dd is None or label.startswith(_PROFILE_SKIP):
+                continue
+            if dl.get("id") == "groups-details":
+                out["groups"] = [{"id": _int(re.search(r"/g(\d+)", a["href"]).group(1)),
+                                  "name": _clean(a.get_text(" "))}
+                                 for a in dd.select("a[href^='/g']")]
+                continue
+            uneditable = dd.find("div", class_="field_uneditable")
+            val_el = uneditable or dd
+            text = _clean(val_el.get_text(" ")).lstrip("-").strip()
+            # texto fora do bloco não editável (ex.: "[0.16% do total ...]")
+            extra = _clean(" ".join(dd.find_all(string=True, recursive=False))) \
+                if uneditable else ""
+            links = [a.get("href") for a in val_el.find_all("a", href=True)
+                     if not a["href"].startswith(("/profile", "/privmsg", "/admin"))]
+            imgs = [abs_url(i.get("src")) for i in val_el.find_all("img")
+                    if i.get("src") and "icon_contact" not in i["src"]
+                    and "empty.gif" not in i["src"]]
+            if label == "Avatar":
+                out["avatar_url"] = imgs[0] if imgs else None
+                continue
+            value: dict | str | None = text or None
+            if links or imgs or extra:
+                value = {"text": text or None}
+                if links:
+                    value["links"] = links
+                if imgs:
+                    value["images"] = imgs
+                if extra:
+                    value["extra"] = extra
+            out["fields"][label] = value
+    out.setdefault("avatar_url", None)
+    f = out["fields"]
+    out["last_visit_raw"] = f.get("Última visita") if isinstance(f.get("Última visita"), str) else None
+    out["last_visit"] = parse_date(out["last_visit_raw"])
+    out["rank_title"] = f.get("Rank") if isinstance(f.get("Rank"), str) else None
+    out["status"] = f.get("Estado") if isinstance(f.get("Estado"), str) else None
+    return out
 
 
 def is_login_page(html: str) -> bool:

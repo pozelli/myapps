@@ -280,6 +280,8 @@ class Crawler:
                 log.warning("Tópico %d exige login; pulando", topic_id)
                 break
             data = parser.parse_topic_page(html, topic_id)
+            if data.get("poll"):
+                self.db.upsert_poll(topic_id, data["poll"])
             if pages == 0:
                 step = data["page_step"] or step
                 title, forum_id = data["title"], data["forum_id"]
@@ -301,6 +303,74 @@ class Crawler:
         self.db.finish_topic(topic_id, title, forum_id, total_pages)
         self.db.commit()
         return saved
+
+    # ------------------------------------------------------- extras: enquetes
+    def scrape_polls(self, shard: tuple[int, int] | None = None) -> int:
+        """Lê só a 1ª página dos tópicos marcados "[Votação]" na listagem."""
+        ids = self.db.poll_topics_pending(shard)
+        log.info("%d enquetes para raspar", len(ids))
+        done = 0
+        for n, tid in enumerate(ids, 1):
+            row = self.db.get_topic(tid)
+            try:
+                html = self.http.get(_page_path(row["url"] or f"/t{tid}-", "t", tid, 0))
+            except FileNotFoundError:
+                log.warning("Tópico %d não encontrado", tid)
+                continue
+            except (RuntimeError, requests.RequestException) as e:
+                log.error("%s — seguindo", e)
+                continue
+            poll = parser.parse_poll(parser.soup_of(html))
+            self.db.upsert_poll(tid, poll or {"question": None, "options": []})
+            self.db.commit()
+            done += 1
+            log.info("[%d/%d] enquete t%d: %s", n, len(ids), tid,
+                     (poll or {}).get("question"))
+        return done
+
+    # ------------------------------------------------- extras: lista de membros
+    def list_members(self, first: int = 0, last: int | None = None) -> int:
+        """Percorre /memberlist (30 por página) entre os offsets first..last."""
+        start, total = first, 0
+        while last is None or start <= last:
+            path = f"/memberlist?mode=joined&order=ASC&start={start}&username"
+            try:
+                data = parser.parse_memberlist_page(self.http.get(path))
+            except (RuntimeError, requests.RequestException) as e:
+                log.error("%s — seguindo", e)
+                start += 30
+                continue
+            for m in data["members"]:
+                self.db.upsert_memberlist_row(m)
+            self.db.commit()
+            total += len(data["members"])
+            log.info("Membros: start=%d → %d", start, len(data["members"]))
+            if not data["members"] or start >= data["last_offset"]:
+                break
+            start += 30
+        return total
+
+    # ------------------------------------------------------- extras: perfis
+    def scrape_profiles(self, shard: tuple[int, int] | None = None,
+                        limit: int | None = None) -> int:
+        ids = self.db.profiles_pending(shard)[:limit]
+        log.info("%d perfis para raspar", len(ids))
+        for n, uid in enumerate(ids, 1):
+            try:
+                html = self.http.get(f"/u{uid}")
+            except FileNotFoundError:
+                self.db.save_profile(uid, None, "não encontrado")
+                self.db.commit()
+                log.warning("Perfil u%d não encontrado", uid)
+                continue
+            except (RuntimeError, requests.RequestException) as e:
+                log.error("%s — seguindo", e)
+                continue
+            prof = parser.parse_profile_page(html, uid)
+            self.db.save_profile(uid, prof)
+            self.db.commit()
+            log.info("[%d/%d] perfil u%d %s", n, len(ids), uid, prof.get("name") or "")
+        return len(ids)
 
     def run(self, forum_ids: list[int] | None = None, topic_ids: list[int] | None = None,
             skip_listing: bool = False, refresh: bool = False,

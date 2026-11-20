@@ -63,6 +63,28 @@ def cmd_list_pages(args):
         db.close()
 
 
+def _with_crawler(args, fn):
+    db = Storage(args.db)
+    try:
+        crawler = Crawler(db, _make_fetcher(args))
+        fn(crawler)
+        logging.info("%d requisições feitas", crawler.http.requests_made)
+    finally:
+        db.close()
+
+
+def cmd_polls(args):
+    _with_crawler(args, lambda c: c.scrape_polls(_parse_shard(args.shard)))
+
+
+def cmd_memberlist(args):
+    _with_crawler(args, lambda c: c.list_members(args.first, args.last))
+
+
+def cmd_profiles(args):
+    _with_crawler(args, lambda c: c.scrape_profiles(_parse_shard(args.shard), args.limit))
+
+
 def cmd_mark_listed(args):
     db = Storage(args.db)
     for fid in args.forum:
@@ -127,8 +149,15 @@ def cmd_export(args):
         d["liked_by"] = json.loads(d["liked_by"] or "[]")
         posts.append(d)
 
+    polls = []
+    for r in db.conn.execute("SELECT * FROM polls ORDER BY topic_id"):
+        d = dict(r)
+        d["options"] = [dict(o) for o in db.conn.execute(
+            "SELECT position, text, votes, percent FROM poll_options "
+            "WHERE topic_id=? ORDER BY position", (d["topic_id"],))]
+        polls.append(d)
     for name, rows in (("members", members), ("forums", forums),
-                       ("topics", topics), ("posts", posts)):
+                       ("topics", topics), ("posts", posts), ("polls", polls)):
         (out / f"{name}.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         _write_csv(out / f"{name}.csv", rows)
@@ -175,6 +204,8 @@ def cmd_stats(args):
     print(f"Tópicos completos: {q('SELECT COUNT(*) FROM topics WHERE completed=1')}")
     print(f"Mensagens:         {q('SELECT COUNT(*) FROM posts')}")
     print(f"Membros:           {q('SELECT COUNT(*) FROM members')}")
+    print(f"Perfis raspados:   {q('SELECT COUNT(*) FROM members WHERE profile_scraped_at IS NOT NULL')}")
+    print(f"Enquetes:          {q('SELECT COUNT(*) FROM polls')}")
     print("\nTop 10 autores (mensagens raspadas):")
     for r in db.conn.execute(
             "SELECT author_name, COUNT(*) c FROM posts GROUP BY author_name "
@@ -247,6 +278,26 @@ def main(argv=None):
                         help="divide os tópicos pendentes em N faixas de ID equilibradas")
     pr.add_argument("-n", type=int, default=10)
     pr.set_defaults(func=cmd_plan)
+
+    po = sub.add_parser("polls", help="raspa as enquetes dos tópicos marcados [Votação]")
+    po.add_argument("--shard", metavar="I/N")
+    po.add_argument("--delay", type=float, default=1.0)
+    po.add_argument("--cookie")
+    po.set_defaults(func=cmd_polls)
+
+    mb = sub.add_parser("memberlist", help="percorre a lista de membros (/memberlist)")
+    mb.add_argument("--first", type=int, default=0, help="offset inicial (múltiplo de 30)")
+    mb.add_argument("--last", type=int, help="offset final, inclusive")
+    mb.add_argument("--delay", type=float, default=1.0)
+    mb.add_argument("--cookie")
+    mb.set_defaults(func=cmd_memberlist)
+
+    pf = sub.add_parser("profiles", help="raspa as páginas de perfil (/uNN) dos membros")
+    pf.add_argument("--shard", metavar="I/N")
+    pf.add_argument("--limit", type=int)
+    pf.add_argument("--delay", type=float, default=1.0)
+    pf.add_argument("--cookie")
+    pf.set_defaults(func=cmd_profiles)
 
     s = sub.add_parser("stats", help="resumo do banco")
     s.set_defaults(func=cmd_stats)

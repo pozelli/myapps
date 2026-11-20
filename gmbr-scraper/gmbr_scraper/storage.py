@@ -102,7 +102,39 @@ CREATE TABLE IF NOT EXISTS members (
     is_guest         INTEGER DEFAULT 0, -- "Convidado": visitante/conta apagada
     updated_at       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS polls (
+    topic_id    INTEGER PRIMARY KEY,
+    question    TEXT,
+    total_votes INTEGER,
+    closed      INTEGER,
+    scraped_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS poll_options (
+    topic_id INTEGER,
+    position INTEGER,
+    text     TEXT,
+    votes    INTEGER,
+    percent  REAL,
+    PRIMARY KEY (topic_id, position)
+);
 """
+
+# Colunas acrescentadas depois da primeira versão: (tabela, coluna, tipo)
+_NEW_COLUMNS = [
+    ("forums", "listing_next_start", "INTEGER"),
+    ("topics", "prefix", "TEXT"),           # ex.: "[Votação]"
+    ("topics", "topic_type", "TEXT"),       # ícone: topic_read_locked, sticky_read...
+    ("members", "humor", "TEXT"),
+    ("members", "last_visit_raw", "TEXT"),
+    ("members", "last_visit", "TEXT"),
+    ("members", "in_memberlist", "INTEGER"),
+    ("members", "profile_fields", "TEXT"),  # JSON: todos os campos da página /uNN
+    ("members", "profile_groups", "TEXT"),  # JSON: grupos do membro
+    ("members", "profile_status", "TEXT"),  # "ok" ou motivo de falha
+    ("members", "profile_scraped_at", "TEXT"),
+]
 
 
 def _looks_like_guest(prof: dict) -> bool:
@@ -128,9 +160,13 @@ class Storage:
 
     def _migrate(self):
         """Adiciona colunas novas a bancos criados por versões anteriores."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(forums)")}
-        if "listing_next_start" not in cols:
-            self.conn.execute("ALTER TABLE forums ADD COLUMN listing_next_start INTEGER")
+        changed = False
+        for table, col, typ in _NEW_COLUMNS:
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                changed = True
+        if changed:
             self.conn.commit()
 
     def commit(self):
@@ -185,8 +221,8 @@ class Storage:
         self.conn.execute(
             """INSERT INTO topics (id, forum_id, title, description, url, section,
                    author_name, replies, views, last_post_id, last_post_author,
-                   last_post_date_raw, last_post_date)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   last_post_date_raw, last_post_date, prefix, topic_type)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  forum_id=COALESCE(topics.forum_id, excluded.forum_id), title=excluded.title,
                  description=excluded.description, url=excluded.url,
@@ -195,11 +231,13 @@ class Storage:
                  last_post_id=excluded.last_post_id,
                  last_post_author=excluded.last_post_author,
                  last_post_date_raw=excluded.last_post_date_raw,
-                 last_post_date=excluded.last_post_date""",
+                 last_post_date=excluded.last_post_date,
+                 prefix=excluded.prefix, topic_type=excluded.topic_type""",
             (t["id"], t.get("forum_id"), t.get("title"), t.get("description"), t.get("url"),
              t.get("section"), t.get("author_name"), t.get("replies"), t.get("views"),
              t.get("last_post_id"), t.get("last_post_author"),
-             t.get("last_post_date_raw"), t.get("last_post_date")),
+             t.get("last_post_date_raw"), t.get("last_post_date"),
+             t.get("prefix"), t.get("topic_type")),
         )
 
     def ensure_topic(self, topic_id: int, url: str | None = None):
@@ -368,6 +406,87 @@ class Storage:
              post_id, post_id, int(_looks_like_guest(prof)), now_iso()),
         )
 
+    # ---------------------------------------------------------------- enquetes
+    def upsert_poll(self, topic_id: int, poll: dict):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO polls (topic_id, question, total_votes, closed, scraped_at)"
+            " VALUES (?,?,?,?,?)",
+            (topic_id, poll.get("question"), poll.get("total_votes"),
+             int(bool(poll.get("closed"))), now_iso()))
+        self.conn.execute("DELETE FROM poll_options WHERE topic_id=?", (topic_id,))
+        for i, o in enumerate(poll.get("options") or []):
+            self.conn.execute(
+                "INSERT INTO poll_options (topic_id, position, text, votes, percent)"
+                " VALUES (?,?,?,?,?)", (topic_id, i, o.get("text"), o.get("votes"),
+                                        o.get("percent")))
+
+    def poll_topics_pending(self, shard: tuple[int, int] | None = None) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT id FROM topics WHERE prefix LIKE '%Vota%' "
+            "AND id NOT IN (SELECT topic_id FROM polls) ORDER BY id").fetchall()
+        ids = [r[0] for r in rows]
+        return [i for i in ids if not shard or i % shard[1] == shard[0]]
+
+    # ------------------------------------------------------- membros (lista/perfil)
+    def upsert_memberlist_row(self, m: dict):
+        """Membro vindo de /memberlist. Pode atualizar o nome de quem mudou de nick:
+        a chave natural aqui é o user_id."""
+        row = self.conn.execute("SELECT name FROM members WHERE user_id=?",
+                                (m["user_id"],)).fetchone()
+        name = row["name"] if row else m["name"]
+        self.conn.execute(
+            """INSERT INTO members (name, user_id, profile_url, avatar_url, joined_raw,
+                 joined_date, post_count, website, humor, last_visit_raw, last_visit,
+                 in_memberlist, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?)
+               ON CONFLICT(name) DO UPDATE SET
+                 user_id=COALESCE(members.user_id, excluded.user_id),
+                 profile_url=COALESCE(excluded.profile_url, members.profile_url),
+                 avatar_url=COALESCE(excluded.avatar_url, members.avatar_url),
+                 joined_raw=COALESCE(members.joined_raw, excluded.joined_raw),
+                 joined_date=COALESCE(members.joined_date, excluded.joined_date),
+                 post_count=COALESCE(excluded.post_count, members.post_count),
+                 website=COALESCE(excluded.website, members.website),
+                 humor=COALESCE(excluded.humor, members.humor),
+                 last_visit_raw=excluded.last_visit_raw, last_visit=excluded.last_visit,
+                 in_memberlist=1, updated_at=excluded.updated_at""",
+            (name, m["user_id"], m.get("profile_url"), m.get("avatar_url"),
+             m.get("joined_raw"), m.get("joined_date"), m.get("post_count"),
+             m.get("website"), m.get("humor"), m.get("last_visit_raw"),
+             m.get("last_visit"), now_iso()))
+
+    def profiles_pending(self, shard: tuple[int, int] | None = None) -> list[int]:
+        """IDs de membros sem perfil raspado, quem tem mais mensagens primeiro."""
+        rows = self.conn.execute(
+            "SELECT user_id FROM members WHERE user_id IS NOT NULL "
+            "AND profile_scraped_at IS NULL "
+            "ORDER BY COALESCE(post_count, 0) DESC, user_id").fetchall()
+        ids = [r[0] for r in rows]
+        return [i for i in ids if not shard or i % shard[1] == shard[0]]
+
+    def save_profile(self, user_id: int, prof: dict | None, status: str = "ok"):
+        if prof is None:
+            self.conn.execute(
+                "UPDATE members SET profile_status=?, profile_scraped_at=? WHERE user_id=?",
+                (status, now_iso(), user_id))
+            return
+        f = prof.get("fields") or {}
+        rank = f.get("Rank") if isinstance(f.get("Rank"), str) else None
+        self.conn.execute(
+            """UPDATE members SET
+                 avatar_url=COALESCE(?, avatar_url), color=COALESCE(?, color),
+                 rank_title=COALESCE(rank_title, ?),
+                 last_visit_raw=COALESCE(?, last_visit_raw),
+                 last_visit=COALESCE(?, last_visit),
+                 profile_fields=?, profile_groups=?, profile_status=?,
+                 profile_scraped_at=?
+               WHERE user_id=?""",
+            (prof.get("avatar_url"), prof.get("color"), rank,
+             prof.get("last_visit_raw"), prof.get("last_visit"),
+             json.dumps(f, ensure_ascii=False),
+             json.dumps(prof.get("groups") or [], ensure_ascii=False),
+             status, now_iso(), user_id))
+
     def upsert_group(self, g: dict):
         self.conn.execute(
             "INSERT OR REPLACE INTO groups (class, id, name, slug, color) VALUES (?,?,?,?,?)",
@@ -395,5 +514,7 @@ class Storage:
             d = dict(r)
             d["extra_fields"] = json.loads(d["extra_fields"] or "{}")
             d["profile_images"] = json.loads(d["profile_images"] or "[]")
+            d["profile_fields"] = json.loads(d.get("profile_fields") or "{}")
+            d["profile_groups"] = json.loads(d.get("profile_groups") or "[]")
             out.append(d)
         return out
