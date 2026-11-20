@@ -32,6 +32,7 @@ class Fetcher:
         self.requests_made = 0
         self.credentials: tuple[str, str] | None = None
         self.expect_logged_in = bool(cookie)
+        self._renewing = False
 
     def _new_session(self) -> requests.Session:
         session = requests.Session()
@@ -104,6 +105,15 @@ class Fetcher:
                 if r.status_code == 404:
                     raise FileNotFoundError(url)
                 log.warning("HTTP %s em %s (tentativa %d)", r.status_code, url, attempt)
+                if r.status_code >= 500 and attempt == 2 and not self._renewing:
+                    # Sessões longas também passam a receber 5xx em páginas
+                    # que abrem normalmente numa sessão nova.
+                    log.warning("Renovando sessão após erros %s", r.status_code)
+                    self._renewing = True
+                    try:
+                        self.renew_session()
+                    finally:
+                        self._renewing = False
             except requests.RequestException as e:
                 log.warning("Erro de rede em %s: %s (tentativa %d)", url, e, attempt)
             time.sleep(min(60, 2 ** attempt * max(self.delay, 1)))
