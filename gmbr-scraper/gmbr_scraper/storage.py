@@ -211,7 +211,8 @@ class Storage:
         return self.conn.execute("SELECT * FROM topics WHERE id=?", (topic_id,)).fetchone()
 
     def topics_to_scrape(self, forum_ids: list[int] | None = None, refresh: bool = False,
-                         shard: tuple[int, int] | None = None):
+                         shard: tuple[int, int] | None = None,
+                         id_range: tuple[int | None, int | None] | None = None):
         """Tópicos pendentes: nunca concluídos, ou com novas respostas desde o crawl."""
         sql = "SELECT * FROM topics"
         cond, args = [], []
@@ -226,10 +227,49 @@ class Storage:
         if shard:
             cond.append("id % ? = ?")
             args += [shard[1], shard[0]]
+        if id_range:
+            lo, hi = id_range
+            if lo is not None:
+                cond.append("id >= ?")
+                args.append(lo)
+            if hi is not None:
+                cond.append("id <= ?")
+                args.append(hi)
         if cond:
             sql += " WHERE " + " AND ".join(cond)
         sql += " ORDER BY id"
         return self.conn.execute(sql, args).fetchall()
+
+    def plan_id_ranges(self, n: int) -> list[tuple[int | None, int | None]]:
+        """Divide os tópicos pendentes em n faixas contíguas de ID com trabalho
+        (páginas a raspar) equilibrado. A primeira faixa começa em None e a
+        última termina em None, cobrindo tópicos que surgirem depois."""
+        rows = self.conn.execute(
+            """SELECT t.id,
+                      MAX(1, COALESCE(t.replies, 0) / 50 + 1
+                             - (SELECT COUNT(*) FROM topic_pages p WHERE p.topic_id = t.id)
+                             + CASE WHEN EXISTS (SELECT 1 FROM topic_pages p
+                                                 WHERE p.topic_id = t.id) THEN 1 ELSE 0 END)
+               FROM topics t
+               WHERE completed=0 OR scraped_replies IS NULL
+                  OR (replies IS NOT NULL AND replies <> scraped_replies)
+               ORDER BY t.id"""
+        ).fetchall()
+        total = sum(r[1] for r in rows)
+        if n <= 1 or not rows:
+            return [(None, None)]
+        cuts, acc, k = [], 0, 1
+        for tid, w in rows:
+            acc += w
+            if k < n and acc >= total * k / n:
+                cuts.append(tid)
+                k += 1
+        ranges, lo = [], None
+        for c in cuts:
+            ranges.append((lo, c))
+            lo = c + 1
+        ranges.append((lo, None))
+        return ranges
 
     def page_done(self, topic_id: int, start: int) -> bool:
         return self.conn.execute(

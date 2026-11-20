@@ -24,6 +24,37 @@ def _parse_shard(value: str | None):
     return i, n
 
 
+def _parse_range(value: str | None):
+    """"100-200" -> (100, 200); "-200" -> (None, 200); "100-" -> (100, None)."""
+    if not value:
+        return None
+    lo, _, hi = value.partition("-")
+    return (int(lo) if lo else None, int(hi) if hi else None)
+
+
+def cmd_plan(args):
+    db = Storage(args.db)
+    for lo, hi in db.plan_id_ranges(args.n):
+        print(f"{'' if lo is None else lo}-{'' if hi is None else hi}")
+    db.close()
+
+
+def _make_fetcher(args) -> Fetcher:
+    fetcher = Fetcher(delay=args.delay, cookie=args.cookie or os.environ.get("GMBR_COOKIE"))
+    user, password = os.environ.get("GMBR_USER"), os.environ.get("GMBR_PASS")
+    if user and password and not fetcher.login(user, password):
+        sys.exit(1)
+    return fetcher
+
+
+def cmd_discover(args):
+    db = Storage(args.db)
+    try:
+        Crawler(db, _make_fetcher(args)).discover_forums()
+    finally:
+        db.close()
+
+
 def cmd_crawl(args):
     db = Storage(args.db)
     cookie = args.cookie or os.environ.get("GMBR_COOKIE")
@@ -40,6 +71,7 @@ def cmd_crawl(args):
             skip_listing=args.skip_listing, refresh=args.refresh,
             max_topics=args.max_topics, max_forum_pages=args.max_forum_pages,
             shard=_parse_shard(args.shard), full_listing=args.full_listing,
+            id_range=_parse_range(args.id_range), list_only=args.list_only,
         )
     except KeyboardInterrupt:
         logging.warning("Interrompido — progresso salvo; rode de novo para continuar.")
@@ -159,6 +191,10 @@ def main(argv=None):
     c.add_argument("--max-forum-pages", type=int, help="limita páginas de listagem por fórum")
     c.add_argument("--shard", metavar="I/N",
                    help="divide os tópicos entre N processos; este pega id %% N == I")
+    c.add_argument("--id-range", metavar="MIN-MAX",
+                   help="só tópicos com ID na faixa (ex.: 1000-5000, -999, 5001-)")
+    c.add_argument("--list-only", action="store_true",
+                   help="só lista os fóruns, sem raspar mensagens")
     c.add_argument("--cookie", help="cabeçalho Cookie de uma sessão logada (ou GMBR_COOKIE)")
     c.set_defaults(func=cmd_crawl)
 
@@ -172,6 +208,16 @@ def main(argv=None):
     a.add_argument("--out", default="avatars")
     a.add_argument("--delay", type=float, default=0.3)
     a.set_defaults(func=cmd_avatars)
+
+    d = sub.add_parser("discover", help="só descobre fóruns/subfóruns e grupos")
+    d.add_argument("--delay", type=float, default=1.0)
+    d.add_argument("--cookie")
+    d.set_defaults(func=cmd_discover)
+
+    pr = sub.add_parser("plan-ranges",
+                        help="divide os tópicos pendentes em N faixas de ID equilibradas")
+    pr.add_argument("-n", type=int, default=10)
+    pr.set_defaults(func=cmd_plan)
 
     s = sub.add_parser("stats", help="resumo do banco")
     s.set_defaults(func=cmd_stats)

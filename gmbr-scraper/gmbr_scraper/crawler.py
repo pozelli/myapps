@@ -250,7 +250,9 @@ class Crawler:
     def run(self, forum_ids: list[int] | None = None, topic_ids: list[int] | None = None,
             skip_listing: bool = False, refresh: bool = False,
             max_topics: int | None = None, max_forum_pages: int | None = None,
-            shard: tuple[int, int] | None = None, full_listing: bool = False):
+            shard: tuple[int, int] | None = None, full_listing: bool = False,
+            id_range: tuple[int | None, int | None] | None = None,
+            list_only: bool = False):
         if topic_ids:
             for tid in topic_ids:
                 self.db.ensure_topic(tid)
@@ -265,7 +267,10 @@ class Crawler:
             for fid in targets:
                 self.list_forum_topics(fid, max_pages=max_forum_pages, full=full_listing)
 
-        pending = self.db.topics_to_scrape(forum_ids, refresh=refresh, shard=shard)
+        if list_only:
+            return
+        pending = self.db.topics_to_scrape(forum_ids, refresh=refresh, shard=shard,
+                                           id_range=id_range)
         if max_topics:
             pending = pending[:max_topics]
         log.info("%d tópicos para raspar", len(pending))
