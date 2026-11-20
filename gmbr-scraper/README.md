@@ -46,15 +46,24 @@ Opções úteis do `crawl`:
 | `--delay 1.0` | intervalo entre requisições (seja gentil com o servidor) |
 | `--skip-listing` | não relista fóruns; só raspa tópicos pendentes já no banco |
 | `--refresh` | raspa de novo todos os tópicos desde a 1ª página |
+| `--full-listing` | lista todas as páginas dos fóruns, sem parada incremental |
 | `--cookie "..."` / `GMBR_COOKIE` | cookie de uma sessão logada (ver abaixo) |
 | `GMBR_USER` + `GMBR_PASS` | faz login antes de raspar (ver abaixo) |
 | `--db arquivo.sqlite` | banco a usar (opção global, vem antes do comando) |
 
 ### Execuções incrementais
 
-Ao rodar de novo, a listagem dos fóruns é relida e só são raspados os tópicos
-**não concluídos** ou cujo número de respostas **mudou**. Nesses, o crawl
-recomeça pela última página já vista (onde entram as mensagens novas).
+- **Listagem:** as listas de tópicos vêm ordenadas pela última mensagem.
+  Depois que um fórum foi listado por completo uma vez, as próximas execuções
+  param na primeira página sem tópicos novos nem respostas novas — em geral
+  1 ou 2 páginas por fórum. Use `--full-listing` para forçar a listagem
+  completa (ex.: para pegar tópicos movidos de outro fórum).
+- **Listagem interrompida:** o banco guarda até onde chegou
+  (`forums.listing_next_start`); ao retomar, relê o início para pegar
+  novidades e pula direto para esse ponto.
+- **Mensagens:** só são raspados os tópicos **não concluídos** ou cujo número
+  de respostas **mudou**. Nesses, o crawl recomeça pela última página já
+  vista (onde entram as mensagens novas).
 
 ## Dados gerados
 

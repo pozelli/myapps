@@ -39,7 +39,7 @@ def cmd_crawl(args):
             forum_ids=args.forum, topic_ids=args.topic,
             skip_listing=args.skip_listing, refresh=args.refresh,
             max_topics=args.max_topics, max_forum_pages=args.max_forum_pages,
-            shard=_parse_shard(args.shard),
+            shard=_parse_shard(args.shard), full_listing=args.full_listing,
         )
     except KeyboardInterrupt:
         logging.warning("Interrompido — progresso salvo; rode de novo para continuar.")
@@ -151,6 +151,8 @@ def main(argv=None):
                    help="segundos entre requisições (padrão: 1.0)")
     c.add_argument("--skip-listing", action="store_true",
                    help="não relista os fóruns; só raspa tópicos pendentes já no banco")
+    c.add_argument("--full-listing", action="store_true",
+                   help="lista todas as páginas dos fóruns (sem parada incremental)")
     c.add_argument("--refresh", action="store_true",
                    help="raspa de novo todos os tópicos desde a 1ª página")
     c.add_argument("--max-topics", type=int, help="limita nº de tópicos (testes)")

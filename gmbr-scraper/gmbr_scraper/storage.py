@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS forums (
     url           TEXT,
     parent_id     INTEGER,
     topics_listed INTEGER,
-    scraped_at    TEXT
+    scraped_at    TEXT,     -- quando a listagem do fórum foi concluída
+    listing_next_start INTEGER  -- offset onde retomar uma listagem interrompida
 );
 
 CREATE TABLE IF NOT EXISTS topics (
@@ -123,6 +124,14 @@ class Storage:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=300000")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        """Adiciona colunas novas a bancos criados por versões anteriores."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(forums)")}
+        if "listing_next_start" not in cols:
+            self.conn.execute("ALTER TABLE forums ADD COLUMN listing_next_start INTEGER")
+            self.conn.commit()
 
     def commit(self):
         self.conn.commit()
@@ -144,10 +153,29 @@ class Storage:
         )
 
     def mark_forum_scraped(self, forum_id: int, topics_listed: int):
+        """Marca a listagem do fórum como concluída."""
         self.conn.execute(
-            "UPDATE forums SET topics_listed=?, scraped_at=? WHERE id=?",
+            "UPDATE forums SET topics_listed=?, scraped_at=?, listing_next_start=NULL "
+            "WHERE id=?",
             (topics_listed, now_iso(), forum_id),
         )
+
+    def set_listing_progress(self, forum_id: int, next_start: int):
+        self.conn.execute(
+            "UPDATE forums SET listing_next_start=? WHERE id=?", (next_start, forum_id)
+        )
+
+    def get_forum(self, forum_id: int):
+        return self.conn.execute("SELECT * FROM forums WHERE id=?", (forum_id,)).fetchone()
+
+    def topic_last_post_ids(self, topic_ids: list[int]) -> dict[int, int | None]:
+        if not topic_ids:
+            return {}
+        rows = self.conn.execute(
+            f"SELECT id, last_post_id FROM topics WHERE id IN ({','.join('?' * len(topic_ids))})",
+            topic_ids,
+        ).fetchall()
+        return {r["id"]: r["last_post_id"] for r in rows}
 
     def forums(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM forums ORDER BY id").fetchall()

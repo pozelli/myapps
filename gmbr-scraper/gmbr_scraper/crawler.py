@@ -136,34 +136,69 @@ class Crawler:
         log.info("%d fóruns encontrados", len(seen))
         return sorted(seen)
 
-    def list_forum_topics(self, forum_id: int, max_pages: int | None = None) -> int:
-        """Percorre todas as páginas de listagem de um fórum."""
-        row = self.db.conn.execute("SELECT url FROM forums WHERE id=?", (forum_id,)).fetchone()
-        base = row["url"] if row and row["url"] else f"/f{forum_id}-"
+    def list_forum_topics(self, forum_id: int, max_pages: int | None = None,
+                          full: bool = False) -> int:
+        """Percorre as páginas de listagem de um fórum.
+
+        A listagem vem ordenada pela última mensagem, então:
+        - se o fórum já foi listado por completo antes, para na primeira página
+          em que nenhum tópico mudou (sem tópicos novos nem respostas novas);
+        - se uma listagem anterior foi interrompida, relê o começo até achar uma
+          página sem mudanças e pula para onde tinha parado;
+        - full=True força a listagem completa.
+        """
+        forum = self.db.get_forum(forum_id)
+        base = forum["url"] if forum and forum["url"] else f"/f{forum_id}-"
+        completed_before = bool(forum and forum["scraped_at"]) and not full
+        resume_at = (forum["listing_next_start"] or 0) if forum and not full else 0
         start, step, last, pages, total = 0, 30, 0, 0, 0
         seen: set[int] = set()
+        finished = False  # chegou ao fim (ou parou por não haver mudanças)
         while True:
             html = self.http.get(_page_path(base, "f", forum_id, start))
             data = parser.parse_forum_page(html, forum_id)
             if pages == 0:
                 step = data["page_step"] or step
             last = max(last, data["last_offset"])
-            new = 0
-            for t in data["topics"]:
-                if t["id"] in seen:
-                    continue  # anúncios/fixos se repetem em todas as páginas
-                seen.add(t["id"])
+            page_topics = [t for t in data["topics"] if t["id"] not in seen]
+            known = self.db.topic_last_post_ids([t["id"] for t in page_topics])
+            changed = 0
+            for t in page_topics:
+                seen.add(t["id"])  # anúncios/fixos se repetem em todas as páginas
+                if t["id"] not in known or t.get("last_post_id") is None \
+                        or known[t["id"]] != t.get("last_post_id"):
+                    changed += 1
                 self.db.upsert_topic_listing(t)
-                new += 1
-            total += new
+            total += len(page_topics)
             pages += 1
-            self.db.commit()
-            log.info("Fórum %d: página %d (start=%d) → %d tópicos", forum_id, pages, start, new)
-            if not data["topics"] or start >= last or (max_pages and pages >= max_pages):
+            log.info("Fórum %d: página %d (start=%d) → %d tópicos, %d novos/alterados",
+                     forum_id, pages, start, len(page_topics), changed)
+            if not data["topics"] or start >= last:
+                finished = True
+                self.db.commit()
                 break
-            start += step
-        self.db.mark_forum_scraped(forum_id, total)
-        self.db.commit()
+            if changed == 0 and (completed_before or resume_at > start + step):
+                if completed_before:
+                    log.info("Fórum %d: sem mudanças a partir daqui; listagem encerrada",
+                             forum_id)
+                    finished = True
+                    self.db.commit()
+                    break
+                # Listagem anterior interrompida: pula para onde parou, voltando
+                # uma página para cobrir deslocamentos causados por tópicos novos.
+                log.info("Fórum %d: retomando listagem em start=%d", forum_id,
+                         resume_at - step)
+                start = resume_at - step
+                resume_at = 0
+            else:
+                start += step
+            self.db.set_listing_progress(forum_id, start)
+            self.db.commit()
+            if max_pages and pages >= max_pages:
+                break
+        if finished:
+            self.db.mark_forum_scraped(forum_id, total)
+            self.db.commit()
         return total
 
     # ----------------------------------------------------------------- tópicos
@@ -215,7 +250,7 @@ class Crawler:
     def run(self, forum_ids: list[int] | None = None, topic_ids: list[int] | None = None,
             skip_listing: bool = False, refresh: bool = False,
             max_topics: int | None = None, max_forum_pages: int | None = None,
-            shard: tuple[int, int] | None = None):
+            shard: tuple[int, int] | None = None, full_listing: bool = False):
         if topic_ids:
             for tid in topic_ids:
                 self.db.ensure_topic(tid)
@@ -228,7 +263,7 @@ class Crawler:
             all_forums = known if (forum_ids and known) else self.discover_forums()
             targets = forum_ids or all_forums
             for fid in targets:
-                self.list_forum_topics(fid, max_pages=max_forum_pages)
+                self.list_forum_topics(fid, max_pages=max_forum_pages, full=full_listing)
 
         pending = self.db.topics_to_scrape(forum_ids, refresh=refresh, shard=shard)
         if max_topics:
