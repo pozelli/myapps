@@ -10,6 +10,8 @@ N="${1:-10}"
 DELAY="${2:-20}"
 DB=data/gmbr.sqlite
 LOGS=data/logs
+# Freio compartilhado: um 429/503 em qualquer processo desacelera todos.
+export GMBR_THROTTLE_FILE="${GMBR_THROTTLE_FILE:-data/throttle.json}"
 mkdir -p "$LOGS"
 
 DONE1="$LOGS/extras_fase1.ok"  # apague para refazer a fase 1

@@ -78,3 +78,19 @@ def test_memberlist_and_profile_storage(tmp_path):
     assert db.profiles_pending() == [99]
     db.upsert_poll(5, parser.parse_poll(parser.soup_of(POLL)))
     assert db.conn.execute("SELECT COUNT(*) FROM poll_options").fetchone()[0] == 2
+
+
+def test_throttle_shared_and_decays(tmp_path, monkeypatch):
+    from gmbr_scraper import crawler
+    path = str(tmp_path / "throttle.json")
+    a, b = crawler.Throttle(path), crawler.Throttle(path)
+    assert a.factor() == 1.0
+    a.hit("HTTP 429")
+    a.hit("HTTP 429")
+    assert b.factor() == 4.0  # o outro processo enxerga o freio
+    t0 = crawler.time.time()
+    monkeypatch.setattr(crawler.time, "time", lambda: t0 + 2 * crawler.Throttle.DECAY + 1)
+    assert b.factor() == 1.0  # caiu pela metade duas vezes
+    for _ in range(10):
+        a.hit("HTTP 429")
+    assert a.factor() == crawler.Throttle.MAX_FACTOR

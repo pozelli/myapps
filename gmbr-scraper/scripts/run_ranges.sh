@@ -9,6 +9,8 @@ N="${1:-10}"
 DELAY="${2:-20}"
 DB=data/gmbr.sqlite
 LOGS=data/logs
+# Freio compartilhado: um 429/503 em qualquer processo desacelera todos.
+export GMBR_THROTTLE_FILE="${GMBR_THROTTLE_FILE:-data/throttle.json}"
 mkdir -p "$LOGS"
 
 mapfile -t RANGES < <(python3 -m gmbr_scraper --db "$DB" plan-ranges -n "$N")

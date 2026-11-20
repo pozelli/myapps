@@ -1,7 +1,9 @@
 """Crawler: percorre fóruns → tópicos → páginas, gravando tudo no SQLite."""
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import time
 
@@ -16,6 +18,48 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0 Safari/537.36 gmbr-archiver"
 )
+
+
+class Throttle:
+    """Freio compartilhado entre processos para quando o fórum limitar a taxa.
+
+    Um 429/503 em qualquer processo dobra o fator (até MAX_FACTOR) e grava no
+    arquivo; todos os processos leem o arquivo e multiplicam o seu intervalo.
+    O fator cai pela metade a cada DECAY segundos sem novo sinal.
+    """
+    MAX_FACTOR = 8.0
+    DECAY = 600.0
+
+    def __init__(self, path: str | None):
+        self.path = path
+        self._local = (1.0, 0.0)  # sem arquivo: só este processo
+
+    def _read(self) -> tuple[float, float]:
+        if not self.path:
+            return self._local
+        try:
+            with open(self.path) as f:
+                d = json.load(f)
+            return float(d["factor"]), float(d["since"])
+        except (OSError, ValueError, KeyError):
+            return 1.0, 0.0
+
+    def factor(self) -> float:
+        f, since = self._read()
+        halvings = min(10, int(max(0.0, time.time() - since) // self.DECAY))
+        return max(1.0, f / (2 ** halvings))
+
+    def hit(self, why: str) -> float:
+        new = min(self.MAX_FACTOR, self.factor() * 2)
+        self._local = (new, time.time())
+        if self.path:
+            tmp = f"{self.path}.{os.getpid()}"
+            with open(tmp, "w") as f:
+                json.dump({"factor": new, "since": time.time(), "why": why}, f)
+            os.replace(tmp, self.path)
+        log.warning("Sinal de limite de taxa (%s): intervalo ×%g em todos os processos",
+                    why, new)
+        return new
 
 
 class Fetcher:
@@ -33,6 +77,7 @@ class Fetcher:
         self.credentials: tuple[str, str] | None = None
         self.expect_logged_in = bool(cookie)
         self._renewing = False
+        self.throttle = Throttle(os.environ.get("GMBR_THROTTLE_FILE"))
 
     def _new_session(self) -> requests.Session:
         session = requests.Session()
@@ -96,7 +141,7 @@ class Fetcher:
     def _get(self, path_or_url: str) -> str:
         url = parser.abs_url(path_or_url)
         for attempt in range(1, self.retries + 1):
-            wait = self.delay - (time.monotonic() - self._last)
+            wait = self.delay * self.throttle.factor() - (time.monotonic() - self._last)
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
@@ -109,6 +154,11 @@ class Fetcher:
                 if r.status_code == 404:
                     raise FileNotFoundError(url)
                 log.warning("HTTP %s em %s (tentativa %d)", r.status_code, url, attempt)
+                if r.status_code in (429, 503):
+                    self.throttle.hit(f"HTTP {r.status_code}")
+                    retry_after = r.headers.get("Retry-After", "")
+                    if retry_after.isdigit():
+                        time.sleep(min(600, int(retry_after)))
                 if r.status_code >= 500 and attempt == 2 and not self._renewing:
                     # Sessões longas também passam a receber 5xx em páginas
                     # que abrem normalmente numa sessão nova.
