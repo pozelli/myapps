@@ -26,24 +26,35 @@ class Fetcher:
         self.delay = delay
         self.retries = retries
         self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": USER_AGENT,
-            "Accept-Language": "pt-BR,pt;q=0.9",
-        })
-        if cookie:
-            # Cookie de uma sessão logada (copiado do navegador), opcional.
-            # Com login, as mensagens trazem links /uNN e os IDs dos membros.
-            # Vai para o cookie jar (e não para o cabeçalho), senão o requests
-            # descarta o cookie ao seguir redirecionamentos.
-            for part in cookie.split(";"):
-                if "=" in part:
-                    k, v = part.strip().split("=", 1)
-                    self.session.cookies.set(k, v, domain=parser.BASE_URL.split("//")[1])
+        self._cookie = cookie
+        self.session = self._new_session()
         self._last = 0.0
         self.requests_made = 0
         self.credentials: tuple[str, str] | None = None
         self.expect_logged_in = bool(cookie)
+
+    def _new_session(self) -> requests.Session:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "pt-BR,pt;q=0.9",
+        })
+        if self._cookie:
+            # Cookie de uma sessão logada (copiado do navegador), opcional.
+            # Com login, as mensagens trazem links /uNN e os IDs dos membros.
+            # Vai para o cookie jar (e não para o cabeçalho), senão o requests
+            # descarta o cookie ao seguir redirecionamentos.
+            for part in self._cookie.split(";"):
+                if "=" in part:
+                    k, v = part.strip().split("=", 1)
+                    session.cookies.set(k, v, domain=parser.BASE_URL.split("//")[1])
+        return session
+
+    def renew_session(self) -> None:
+        """Descarta a sessão HTTP atual e abre outra (refazendo o login)."""
+        self.session = self._new_session()
+        if self.credentials:
+            self.login(*self.credentials)
 
     def login(self, username: str, password: str) -> bool:
         """Inicia sessão no fórum; os cookies ficam na sessão HTTP."""
@@ -63,7 +74,14 @@ class Fetcher:
         return ok
 
     def get(self, path_or_url: str, check_session: bool = True) -> str:
-        text = self._get(path_or_url)
+        try:
+            text = self._get(path_or_url)
+        except FileNotFoundError:
+            # Sessões longas passam a receber 404 em páginas que existem; só
+            # aceita o 404 depois de confirmar com uma sessão nova.
+            log.warning("404 em %s; confirmando com sessão nova", path_or_url)
+            self.renew_session()
+            text = self._get(path_or_url)
         if check_session and self.expect_logged_in and "/login?logout" not in text:
             log.warning("Sessão de login expirou em %s", path_or_url)
             if self.credentials and self.login(*self.credentials):
@@ -241,6 +259,8 @@ class Crawler:
                 html = self.http.get(_page_path(base, "t", topic_id, start))
             except FileNotFoundError:
                 log.warning("Tópico %d (start=%d) não encontrado", topic_id, start)
+                if pages == 0:
+                    return 0  # não marca como concluído; fica pendente
                 break
             if parser.is_login_page(html):
                 log.warning("Tópico %d exige login; pulando", topic_id)
