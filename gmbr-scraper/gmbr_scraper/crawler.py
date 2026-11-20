@@ -60,12 +60,16 @@ class Fetcher:
     def login(self, username: str, password: str) -> bool:
         """Inicia sessão no fórum; os cookies ficam na sessão HTTP."""
         self.get("/login", check_session=False)
-        r = self.session.post(parser.abs_url("/login"), timeout=self.timeout, data={
-            "username": username, "password": password, "autologin": "on",
-            "redirect": "", "query": "", "login": "Iniciar sessão",
-        })
-        self._last = time.monotonic()
-        ok = r.status_code == 200 and "/login?logout" in self.get("/", check_session=False)
+        try:
+            r = self.session.post(parser.abs_url("/login"), timeout=self.timeout, data={
+                "username": username, "password": password, "autologin": "on",
+                "redirect": "", "query": "", "login": "Iniciar sessão",
+            })
+            self._last = time.monotonic()
+            ok = r.status_code == 200 and "/login?logout" in self.get("/", check_session=False)
+        except (requests.RequestException, RuntimeError) as e:
+            log.warning("Erro de rede no login: %s", e)
+            ok = False
         if ok:
             self.credentials = (username, password)
             self.expect_logged_in = True
@@ -329,5 +333,5 @@ class Crawler:
             log.info("[%d/%d] t%d %s", n, len(pending), t["id"], t["title"] or "")
             try:
                 self.scrape_topic(t["id"], full=refresh)
-            except RuntimeError as e:
+            except (RuntimeError, requests.RequestException) as e:
                 log.error("%s — seguindo para o próximo tópico", e)
