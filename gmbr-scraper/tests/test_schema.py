@@ -207,3 +207,27 @@ def test_edit_by_moderator_is_discarded(tmp_path):
         "SELECT post_id, name, method, confidence FROM post_author_guesses "
         "WHERE method IN ('citacao', 'edicao') ORDER BY post_id")]
     assert got == [(1, "Beto", "citacao", "alta"), (3, "Solo", "edicao", "baixa")]
+
+
+def test_period_candidates(tmp_path):
+    from gmbr_scraper.guesses import build_guesses
+    db = Storage(str(tmp_path / "t.sqlite"))
+    for tid in (1, 2, 3):
+        db.upsert_topic_listing({"id": tid, "forum_id": 9, "replies": 0})
+    posts = [
+        (1, 1, 0, "Convidad", "Texto longo que alguém vai citar depois aqui", "", "2010-01-01"),
+        (2, 1, 1, "Ana", "r", "<blockquote><cite>Beto escreveu:</cite>Texto longo que "
+         "alguém vai citar depois aqui</blockquote>ok", "2010-01-02"),
+        (3, 2, 0, "Convidad", "Sem pista nenhuma", "", "2010-01-06"),   # 5 dias depois
+        (4, 3, 0, "Convidad", "Também sem pista", "", "2010-03-15")]   # fora da janela
+    for pid, tid, pos, author, text, html, date in posts:
+        db.upsert_post({"id": pid, "topic_id": tid, "author_name": author,
+                        "content_text": text, "content_html": html,
+                        "date": date + "T10:00:00"}, 0, pos)
+    db.commit()
+    build_guesses(db.conn)
+    got = [tuple(r) for r in db.conn.execute(
+        "SELECT post_id, name, method, confidence, score FROM post_author_guesses "
+        "ORDER BY post_id")]
+    assert got == [(1, "Beto", "citacao", "alta", 0.9),
+                   (3, "Beto", "periodo", "baixa", 0.25)]

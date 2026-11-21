@@ -22,6 +22,15 @@ Métodos (score = confiança aproximada):
 * continuidade(0.3, baixa) — outra mensagem de convidado do mesmo tópico foi
                              atribuída por citação a um único nome.
 
+* periodo     (≤0.25, baixa) — só para mensagens sem outra pista: quem foi
+                             identificado (citação/edição confirmada) em
+                             mensagens de convidado de ±15 dias, com peso dobrado
+                             no mesmo fórum e excluindo o próprio tópico. Até 3
+                             candidatos, score = 0.25 × fatia do candidato.
+                             Fica de fora quem já tinha conta com o nome na data.
+                             Validação (escondendo citações conhecidas): o 1º
+                             candidato acerta ~57%, um dos 3 ~87%.
+
 O user_id de cada nome é decidido só por citação ou edição confirmada: "conta" se a
 conta já existia na data da mensagem, "recadastro" se a única conta com esse
 nome foi criada depois (a pessoa voltou após ter a conta apagada).
@@ -38,10 +47,13 @@ from bs4 import BeautifulSoup
 
 log = logging.getLogger("gmbr.guesses")
 
-SCORES = {"citacao": 0.9, "edicao": 0.7, "mencao": 0.4, "continuidade": 0.3}
+SCORES = {"citacao": 0.9, "edicao": 0.7, "mencao": 0.4, "continuidade": 0.3,
+          "periodo": 0.25}  # periodo: multiplicado pela fatia do candidato
+PERIOD_DAYS = 15      # janela: ±15 dias (≈ 1 mês)
+PERIOD_TOP = 3        # candidatos por mensagem
 EDIT_ALONE_SCORE = 0.5  # edição sem outra pista apontando o mesmo nome
 CONFIDENCE = {"citacao": "alta", "edicao": "média", "mencao": "baixa",
-              "continuidade": "baixa"}
+              "continuidade": "baixa", "periodo": "baixa"}
 GUEST_FILTER = "author_id IS NULL AND author_name LIKE 'Convidad%'"
 
 _WORD = re.compile(r"\w+", re.UNICODE)
@@ -228,6 +240,12 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     def edit_confirmed(post_id: int, name: str) -> bool:
         return names_by_post[post_id][name] > 1  # outra pista, mesmo nome
 
+    first_join: dict[str, str] = {}
+    for _uid, n, j in members:
+        if j and (n not in first_join or j < first_join[n]):
+            first_join[n] = j
+    rows += _period_rows(conn, rows, edit_confirmed, first_join)
+
     name_user: dict[str, int | None] = {}
     for post_id, name, method, evidence, date in rows:
         if not (method == "citacao" or (method == "edicao" and edit_confirmed(post_id, name))):
@@ -260,6 +278,8 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         conf, score = CONFIDENCE[method], SCORES[method]
         if method == "edicao" and not edit_confirmed(post_id, name):
             conf, score = "baixa", EDIT_ALONE_SCORE
+        elif method == "periodo":
+            score = round(score * evidence["fatia"], 3)
         out.append((post_id, name, uid, link, method, conf, score,
                     json.dumps(evidence, ensure_ascii=False)))
     conn.executemany(
@@ -274,6 +294,48 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         f"SELECT COUNT(*) FROM posts WHERE {GUEST_FILTER}").fetchone()[0]
     log.info("Sugestões: %s", dict(stats))
     return dict(stats)
+
+
+def _period_rows(conn: sqlite3.Connection, rows: list, edit_confirmed,
+                 first_join: dict[str, str]) -> list:
+    """Candidatos por atividade no mesmo período (veja o docstring do módulo).
+
+    Quem já tinha conta com esse nome na data da mensagem fica de fora: estaria
+    postando com ela, não como convidado (ex.: quem voltou com conta nova)."""
+    import bisect
+    from datetime import datetime, timedelta
+
+    guessed = {r[0] for r in rows}
+    info = {pid: (date, tid, fid) for pid, date, tid, fid in conn.execute(
+        """SELECT p.id, p.date, p.topic_id, t.forum_id FROM posts p
+            JOIN topics t ON t.id = p.topic_id
+            WHERE p.author_id IS NULL AND p.author_name LIKE 'Convidad%'
+              AND p.date IS NOT NULL""")}
+    ident = sorted({(datetime.fromisoformat(info[pid][0]), name, info[pid][1], info[pid][2])
+                    for pid, name, method, _, _ in rows if pid in info
+                    and (method == "citacao" or (method == "edicao"
+                                                 and edit_confirmed(pid, name)))})
+    when = [x[0] for x in ident]
+    span = timedelta(days=PERIOD_DAYS)
+    out = []
+    for pid, (date, tid, fid) in info.items():
+        if pid in guessed:
+            continue
+        d = datetime.fromisoformat(date)
+        weight: Counter = Counter()
+        n = 0
+        for _, name, t, f in ident[bisect.bisect_left(when, d - span):
+                                   bisect.bisect_right(when, d + span)]:
+            if t == tid or first_join.get(name, "9999") <= date[:10]:
+                continue
+            weight[name] += 2 if f == fid else 1
+            n += 1
+        total = sum(weight.values())
+        for name, w in weight.most_common(PERIOD_TOP):
+            out.append((pid, name, "periodo",
+                        {"janela_dias": PERIOD_DAYS, "fatia": round(w / total, 3),
+                         "identificadas_no_periodo": n}, date))
+    return out
 
 
 def _candidates(text: str, by_first_word: dict[str, list[str]]):

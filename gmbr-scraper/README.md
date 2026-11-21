@@ -120,6 +120,7 @@ Tabelas:
   | `edicao` | média se outra pista aponta o mesmo nome; senão baixa | "Última edição por X" — X pode ter sido moderador (conta apagada), então editores que editaram mensagem de outro membro ou que contradizem uma citação são descartados |
   | `mencao` | baixa | a resposta seguinte chama X pelo nome (~65% de acerto medido contra citação/edição) |
   | `continuidade` | baixa | outra mensagem de convidado do tópico foi atribuída a X (~30%) |
+  | `periodo` | baixa | só se não há outra pista: até 3 nomes identificados (citação/edição confirmada) em mensagens de convidado de ±15 dias, em outros tópicos, peso dobrado no mesmo fórum; exclui quem já tinha conta na data. 1º candidato acerta ~57%, um dos 3 ~87% (validado escondendo citações conhecidas) |
 
 Todas as relações têm chave estrangeira (verificada no commit).
 
