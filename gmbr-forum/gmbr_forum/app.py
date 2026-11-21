@@ -688,7 +688,7 @@ class Pages:
 <tr><th>Nome</th><th>Mensagens</th><th class="v">Arquivadas</th><th class="last">Inscrição</th></tr>{trs}</table></div>{pg}"""
         return layout("Membros", body, [("Índice", "/"), ("Membros", None)])
 
-    def member_page(self, h, name: str):
+    def member_page(self, h, name: str, mode: str = "pessoa"):
         m = self.f.member(name)
         posts = self.f.member_posts(name)
         ident = self.identity_box(name, m["user_id"] if m else None)
@@ -744,7 +744,7 @@ class Pages:
         hits = "".join(self.hit(p) for p in posts) or '<div class="hit">Nenhuma mensagem arquivada.</div>'
         body = f"""<div class="box"><h2>{e(name)}</h2>
 <div style="padding:12px">{''.join(info) or 'Sem dados de perfil.'}<div style="clear:both"></div></div></div>
-{ident}{self.search.member_correlations(name) if self.search else ''}
+{ident}{self.search.member_correlations(name, mode) if self.search else ''}
 <div class="box"><h2>Mensagens arquivadas recentes</h2>{hits}</div>"""
         return layout(name, body, [("Índice", "/"), ("Membros", "/membros"), (name, None)])
 
@@ -873,7 +873,7 @@ def make_handler(forum: Forum):
             elif path == "/membros":
                 html = pages.members_page(self, page, qs.get("q", ""))
             elif m := re.fullmatch(r"/membro/(.+)", path):
-                html = pages.member_page(self, unquote(m[1]))
+                html = pages.member_page(self, unquote(m[1]), qs.get("juntar", "pessoa"))
             elif path == "/busca":
                 return self.redirect("/busca/mensagens" + (f"?{u.query}" if u.query else ""))
             elif m := re.fullmatch(r"/busca/(mensagens|topicos|usuarios)", path):

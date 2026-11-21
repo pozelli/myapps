@@ -267,9 +267,11 @@ LABELS = {
     "rep_min": "reputação ≥", "rep_max": "reputação ≤", "top_min": "tópicos ≥", "citado_min": "citado ≥",
     "curtido_min": "curtido ≥", "avatar": "avatar", "assinatura": "assinatura", "site": "site",
     "com_mensagens": "com mensagens", "rel_user": "relação com", "rel": None, "rel_min": "relação ≥",
+    "juntar": "juntar nomes",
 }
 DEFAULTS = {"campo": "ambos", "tipo": "todas", "origem": ("todas", "todos"), "onde": "titulo",
-            "part_modo": "todos", "subforuns": "1", "nome_modo": "contem", "rel": "conversou"}
+            "part_modo": "todos", "subforuns": "1", "nome_modo": "contem", "rel": "conversou",
+            "juntar": "pessoa"}
 
 
 def chips(P: Params, path: str, forum_names: dict) -> str:
@@ -289,6 +291,25 @@ def chips(P: Params, path: str, forum_names: dict) -> str:
         text = f"{label}: {v}" if v else label
         out.append(f'<a href="{e(P.url(path, **{k: None}))}" title="remover filtro">{e(text)} ×</a>')
     return f'<div class="chips">{"".join(out)}<a href="{path}">limpar tudo</a></div>' if len(out) > 0 else ""
+
+
+# Juntar nomes: "pessoa" (contas da mesma pessoa), "conta" (nicks antigos da
+# mesma conta) ou "nome" (cada nome por si).
+JOIN_MODES = (("pessoa", "da mesma pessoa (várias contas)"), ("conta", "da mesma conta (nicks antigos)"),
+              ("nome", "não juntar"))
+SUFFIX = {"pessoa": "per", "conta": "acc", "nome": "lc"}
+KEY_COL = {"pessoa": "per_key", "conta": "acc_key", "nome": "name_lc"}
+TP_TABLE = {"pessoa": "tp_per", "conta": "tp_acc", "nome": "tp"}
+
+
+def join_mode(P: "Params") -> str:
+    return P.choice("juntar", [k for k, _ in JOIN_MODES], "pessoa")
+
+
+def join_select(P: "Params") -> str:
+    cur = join_mode(P)
+    return (f'<label>Juntar nomes<select name="juntar">'
+            + "".join(opt(k, lbl, cur) for k, lbl in JOIN_MODES) + "</select></label>")
 
 
 def topic_tags(t) -> str:
@@ -399,6 +420,38 @@ class SearchPages:
     def run(self, sql: str, args: list):
         return self.db.execute(sql, args).fetchall()
 
+    def key_of(self, name: str, mode: str) -> str:
+        n = name.strip().lower()
+        if mode == "nome":
+            return n
+        r = self.db.execute(f"SELECT {KEY_COL[mode]} FROM s.ident WHERE name_lc = ?", (n,)).fetchone()
+        return r[0] if r and r[0] else n
+
+    def expand(self, names: list[str], mode: str) -> list[str]:
+        """Todos os nomes que pertencem à mesma conta/pessoa dos nomes dados."""
+        if not names or mode == "nome":
+            return names
+        keys = list({self.key_of(n, mode) for n in names})
+        q = ",".join("?" * len(keys))
+        found = [r[0] for r in self.db.execute(
+            f"SELECT name_lc FROM s.ident WHERE {KEY_COL[mode]} IN ({q})", keys)]
+        return list(dict.fromkeys(names + keys + found))[:400]
+
+    def same_names(self, key: str, mode: str) -> list[str]:
+        if mode == "nome":
+            return []
+        return [r[0] for r in self.db.execute(
+            f"SELECT name FROM s.ident WHERE {KEY_COL[mode]} = ? AND name_lc <> ? ORDER BY name COLLATE NOCASE",
+            (key, key))]
+
+    def key_labels(self, keys) -> dict[str, str]:
+        keys = [k for k in keys if k]
+        if not keys:
+            return {}
+        q = ",".join("?" * len(keys))
+        return {r[0]: r[1] for r in self.db.execute(
+            f"SELECT name_lc, name FROM s.ident WHERE name_lc IN ({q})", keys)}
+
     # ============================================================ MENSAGENS
     MSG_ORDERS = [("relevancia", "relevância"), ("recentes", "mais recentes"), ("antigas", "mais antigas"),
                   ("curtidas", "mais curtidas"), ("maiores", "mais longas"), ("menores", "mais curtas")]
@@ -409,6 +462,7 @@ class SearchPages:
 
     def msg_where(self, P: Params, errors: list) -> tuple[str, list, str | None]:
         where, args = ["1=1"], []
+        mode = join_mode(P)
         fts, err = fts_query(P.str("q"), P.choice("modo", ("todas", "qualquer", "frase"), "todas"))
         if err and P.str("q"):
             errors.append(err)
@@ -418,11 +472,11 @@ class SearchPages:
             if P.flag("incluir_citado") and "body" in cols:
                 cols.append("quoted")
             fts = "{" + " ".join(cols) + "} : (" + fts + ")"
-        names = P.names("autor")
+        names = self.expand(P.names("autor"), mode)
         if names:
             where.append(f"p.author_lc IN ({','.join('?' * len(names))})")
             args += names
-        ex = P.names("excluir")
+        ex = self.expand(P.names("excluir"), mode)
         if ex:
             where.append(f"COALESCE(p.author_lc, '') NOT IN ({','.join('?' * len(ex))})")
             args += ex
@@ -465,18 +519,19 @@ class SearchPages:
         if (n := P.int("tam_max", 0)) is not None:
             where.append("p.nchars <= ?")
             args.append(n)
-        if (q := P.names("cita")):
-            where.append(f"p.id IN (SELECT post_id FROM s.quotes WHERE quoted_lc IN ({','.join('?' * len(q))}))")
+        sfx = SUFFIX[mode]
+        if (q := list(dict.fromkeys(self.key_of(n, mode) for n in P.names("cita")))):
+            where.append(f"p.id IN (SELECT post_id FROM s.quotes WHERE quoted_{sfx} IN ({','.join('?' * len(q))}))")
             args += q
-        if (q := P.names("curtida_por")):
-            where.append(f"p.id IN (SELECT post_id FROM s.likes WHERE liker_lc IN ({','.join('?' * len(q))}))")
+        if (q := list(dict.fromkeys(self.key_of(n, mode) for n in P.names("curtida_por")))):
+            where.append(f"p.id IN (SELECT post_id FROM s.likes WHERE liker_{sfx} IN ({','.join('?' * len(q))}))")
             args += q
-        if (q := P.names("em_topicos_de")):
+        if (q := self.expand(P.names("em_topicos_de"), mode)):
             where.append(f"p.topic_ref IN (SELECT ref FROM s.tm WHERE author_lc IN ({','.join('?' * len(q))}))")
             args += q
         for name in P.names("com_participante"):
-            where.append("p.topic_ref IN (SELECT topic_ref FROM s.tp WHERE author_lc = ?)")
-            args.append(name)
+            where.append(f"p.topic_ref IN (SELECT topic_ref FROM s.{TP_TABLE[mode]} WHERE author_lc = ?)")
+            args.append(self.key_of(name, mode))
         origem = P.choice("origem", ("todas", "arquivo", "novas"), "todas")
         if origem != "todas":
             where.append(f"p.is_local = {1 if origem == 'novas' else 0}")
@@ -538,8 +593,11 @@ class SearchPages:
         names = self.forum_names()
         forums = self.run(f"""SELECT p.forum_id, COUNT(*) n FROM {frm} WHERE {fwhere}
                               GROUP BY p.forum_id ORDER BY n DESC LIMIT 12""", fargs)
-        authors = self.run(f"""SELECT MAX(p.author) a, COUNT(*) n FROM {frm} WHERE {fwhere}
-                               AND p.author_lc IS NOT NULL GROUP BY p.author_lc ORDER BY n DESC LIMIT 12""", fargs)
+        col = f"p.author_{SUFFIX[join_mode(P)]}"
+        authors = self.run(f"""SELECT {col} k, MAX(p.author) a, COUNT(*) n FROM {frm} WHERE {fwhere}
+                               AND {col} IS NOT NULL GROUP BY {col} ORDER BY n DESC LIMIT 12""", fargs)
+        labels = self.key_labels(r["k"] for r in authors)
+        authors = [(labels.get(r["k"], r["a"]), r["n"]) for r in authors]
         years = self.run(f"""SELECT substr(p.date, 1, 4) y, COUNT(*) n FROM {frm} WHERE {fwhere}
                              GROUP BY y ORDER BY y""", fargs)
         return (facet_box("Fóruns", [(names.get(r[0], f"Fórum {r[0]}"), P.url(path, forum=r[0], subforuns=0), r[1])
@@ -631,7 +689,8 @@ class SearchPages:
 <label>Cita o usuário</label>{inp('cita', P, placeholder='mensagens que citam…')}
 <label>Curtida por</label>{inp('curtida_por', P)}
 <label>Em tópicos criados por</label>{inp('em_topicos_de', P)}
-<label>Em tópicos onde também postou</label>{inp('com_participante', P, placeholder='todos os nomes devem ter postado')}</fieldset>
+<label>Em tópicos onde também postou</label>{inp('com_participante', P, placeholder='todos os nomes devem ter postado')}
+{join_select(P)}</fieldset>
 </div>
 <div style="margin-top:10px"><label class="ck"><input type="checkbox" name="agrupar" value="1"{' checked' if P.flag('agrupar') else ''}>agrupar por tópico (1 resultado por tópico)</label>
 <button>Buscar</button> <a href="{path}" class="small">limpar</a></div></details></form>"""
@@ -663,6 +722,7 @@ class SearchPages:
         joins = ""
         cte = ""
         rank = None
+        jm = join_mode(P)
         mode = P.choice("modo", ("todas", "qualquer", "frase"), "todas")
         fts, err = fts_query(P.str("q"), mode)
         if err and P.str("q"):
@@ -684,22 +744,23 @@ class SearchPages:
                 joins += " JOIN mm ON mm.ref = t.ref"
                 args.append("{title body} : (" + fts + ")")
                 rank = "mm.r"
-        if (q := P.names("autor")):
+        if (q := self.expand(P.names("autor"), jm)):
             where.append(f"t.author_lc IN ({','.join('?' * len(q))})")
             args += q
-        parts = P.names("participantes")
+        tpt = TP_TABLE[jm]
+        parts = list(dict.fromkeys(self.key_of(n, jm) for n in P.names("participantes")))
         if parts:
             if P.choice("part_modo", ("todos", "qualquer"), "todos") == "todos":
                 for n in parts:
-                    where.append("t.ref IN (SELECT topic_ref FROM s.tp WHERE author_lc = ?)")
+                    where.append(f"t.ref IN (SELECT topic_ref FROM s.{tpt} WHERE author_lc = ?)")
                     args.append(n)
             else:
-                where.append(f"t.ref IN (SELECT topic_ref FROM s.tp WHERE author_lc IN ({','.join('?' * len(parts))}))")
+                where.append(f"t.ref IN (SELECT topic_ref FROM s.{tpt} WHERE author_lc IN ({','.join('?' * len(parts))}))")
                 args += parts
-        if (q := P.names("sem_participante")):
-            where.append(f"t.ref NOT IN (SELECT topic_ref FROM s.tp WHERE author_lc IN ({','.join('?' * len(q))}))")
+        if (q := list(dict.fromkeys(self.key_of(n, jm) for n in P.names("sem_participante")))):
+            where.append(f"t.ref NOT IN (SELECT topic_ref FROM s.{tpt} WHERE author_lc IN ({','.join('?' * len(q))}))")
             args += q
-        if (q := P.names("msg_de")):  # tópicos onde X respondeu (não criou)
+        if (q := self.expand(P.names("msg_de"), jm)):  # tópicos onde X respondeu (não criou)
             where.append(f"t.ref IN (SELECT topic_ref FROM s.pm WHERE author_lc IN ({','.join('?' * len(q))}) AND position > 0)")
             args += q
         fids = self.forum_ids(P)
@@ -758,11 +819,15 @@ class SearchPages:
                                 args + [PER_PAGE, (page - 1) * PER_PAGE])
                 names = self.forum_names()
                 forums = self.run(cte + f"SELECT t.forum_id, COUNT(*) n FROM {frm} WHERE {w} GROUP BY 1 ORDER BY n DESC LIMIT 12", args)
-                authors = self.run(cte + f"""SELECT MAX(t.author) a, COUNT(*) n FROM {frm} WHERE {w} AND t.author_lc IS NOT NULL
-                                       GROUP BY t.author_lc ORDER BY n DESC LIMIT 10""", args)
-                partic = self.run(cte + f"""SELECT MAX(u.name) a, COUNT(*) n FROM {frm} JOIN s.tp x ON x.topic_ref = t.ref
-                                      JOIN s.um u ON u.name_lc = x.author_lc WHERE {w}
+                acol = f"t.author_{SUFFIX[jm]}"
+                authors = self.run(cte + f"""SELECT {acol} k, MAX(t.author) a, COUNT(*) n FROM {frm} WHERE {w}
+                                       AND {acol} IS NOT NULL GROUP BY {acol} ORDER BY n DESC LIMIT 10""", args)
+                partic = self.run(cte + f"""SELECT x.author_lc k, x.author_lc a, COUNT(*) n FROM {frm}
+                                      JOIN s.{tpt} x ON x.topic_ref = t.ref WHERE {w} AND x.author_lc NOT IN ('convidado', 'convidad')
                                       GROUP BY x.author_lc ORDER BY n DESC LIMIT 10""", args) if total <= 5000 else []
+                labels = self.key_labels([r["k"] for r in authors] + [r["k"] for r in partic])
+                authors = [(labels.get(r["k"], r["a"]), r["n"]) for r in authors]
+                partic = [(labels.get(r["k"], r["a"]), r["n"]) for r in partic]
                 years = self.run(cte + f"SELECT substr(t.created, 1, 4) y, COUNT(*) FROM {frm} WHERE {w} GROUP BY y ORDER BY y", args)
             except sqlite3.OperationalError as exc:
                 body += f'<div class="err">Não foi possível executar a busca: {e(exc)}</div>'
@@ -819,7 +884,8 @@ class SearchPages:
 <label>Participantes</label>{inp('participantes', P, placeholder='ex.: saim, vinians')}
 <label>Os participantes<select name="part_modo">{opt('todos', 'todos postaram', pm)}{opt('qualquer', 'pelo menos um postou', pm)}</select></label>
 <label>Respondido por (sem ter criado)</label>{inp('msg_de', P)}
-<label>Sem participação de</label>{inp('sem_participante', P)}</fieldset>
+<label>Sem participação de</label>{inp('sem_participante', P)}
+{join_select(P)}</fieldset>
 <fieldset><legend>Onde</legend>{self.forum_select(P)}
 <label>Prefixo<select name="prefixo">{popts}</select></label>
 <label>Origem<select name="origem">{opt('todos', 'arquivo e novos', origem)}{opt('arquivo', 'só arquivo do gmbr', origem)}{opt('novos', 'só tópicos novos', origem)}</select></label></fieldset>
@@ -830,26 +896,33 @@ class SearchPages:
 </div><div style="margin-top:10px"><button>Buscar</button> <a href="{path}" class="small">limpar</a></div></details></form>"""
 
     # ============================================================= USUÁRIOS
+    # {s}: sufixo da coluna (lc/acc/per); {tp}: tabela de participantes do modo
     RELATIONS = {
         "conversou": ("participaram dos mesmos tópicos que",
-                      """SELECT t2.author_lc AS k, COUNT(*) AS c FROM s.tp t1
-                         JOIN s.tp t2 ON t2.topic_ref = t1.topic_ref AND t2.author_lc <> t1.author_lc
+                      """SELECT t2.author_lc AS k, COUNT(*) AS c FROM s.{tp} t1
+                         JOIN s.{tp} t2 ON t2.topic_ref = t1.topic_ref AND t2.author_lc <> t1.author_lc
                          WHERE t1.author_lc = ? GROUP BY t2.author_lc""", "tópicos em comum"),
-        "citou": ("citaram", "SELECT quoter_lc AS k, COUNT(*) AS c FROM s.quotes WHERE quoted_lc = ? GROUP BY 1",
-                  "citações"),
-        "citado": ("foram citados por", "SELECT quoted_lc AS k, COUNT(*) AS c FROM s.quotes WHERE quoter_lc = ? GROUP BY 1",
-                   "citações"),
-        "curtiu": ("curtiram mensagens de", "SELECT liker_lc AS k, COUNT(*) AS c FROM s.likes WHERE liked_lc = ? GROUP BY 1",
-                   "curtidas"),
-        "curtido": ("foram curtidos por", "SELECT liked_lc AS k, COUNT(*) AS c FROM s.likes WHERE liker_lc = ? GROUP BY 1",
-                    "curtidas"),
+        "citou": ("citaram", """SELECT quoter_{s} AS k, COUNT(*) AS c FROM s.quotes
+                               WHERE quoted_{s} = ? AND quoter_{s} <> quoted_{s} GROUP BY 1""", "citações"),
+        "citado": ("foram citados por", """SELECT quoted_{s} AS k, COUNT(*) AS c FROM s.quotes
+                                          WHERE quoter_{s} = ? AND quoter_{s} <> quoted_{s} GROUP BY 1""", "citações"),
+        "curtiu": ("curtiram mensagens de", """SELECT liker_{s} AS k, COUNT(*) AS c FROM s.likes
+                                              WHERE liked_{s} = ? AND liker_{s} <> liked_{s} GROUP BY 1""", "curtidas"),
+        "curtido": ("foram curtidos por", """SELECT liked_{s} AS k, COUNT(*) AS c FROM s.likes
+                                            WHERE liker_{s} = ? AND liker_{s} <> liked_{s} GROUP BY 1""", "curtidas"),
         "respondeu": ("responderam em tópicos criados por",
-                      """SELECT p.author_lc AS k, COUNT(*) AS c FROM s.pm p JOIN s.tm t ON t.ref = p.topic_ref
-                         WHERE t.author_lc = ? AND p.position > 0 GROUP BY 1""", "respostas"),
+                      """SELECT p.author_{s} AS k, COUNT(*) AS c FROM s.pm p JOIN s.tm t ON t.ref = p.topic_ref
+                         WHERE t.author_{s} = ? AND p.position > 0 AND p.author_{s} <> t.author_{s} GROUP BY 1""",
+                      "respostas"),
         "respondido": ("tiveram tópicos respondidos por",
-                       """SELECT t.author_lc AS k, COUNT(*) AS c FROM s.pm p JOIN s.tm t ON t.ref = p.topic_ref
-                          WHERE p.author_lc = ? AND p.position > 0 GROUP BY 1""", "respostas"),
+                       """SELECT t.author_{s} AS k, COUNT(*) AS c FROM s.pm p JOIN s.tm t ON t.ref = p.topic_ref
+                          WHERE p.author_{s} = ? AND p.position > 0 AND p.author_{s} <> t.author_{s} GROUP BY 1""",
+                       "respostas"),
     }
+
+    def rel_sql(self, rel: str, mode: str) -> str:
+        return self.RELATIONS[rel][1].format(s=SUFFIX[mode], tp=TP_TABLE[mode])
+
     USER_ORDERS = [("relacao", "força da relação"), ("relevancia", "relevância do texto"),
                    ("mensagens", "mensagens (perfil)"), ("arquivadas", "mensagens arquivadas"),
                    ("reputacao", "reputação"), ("topicos", "tópicos criados"),
@@ -883,15 +956,17 @@ class SearchPages:
             args.append("{profile signature} : (" + fts + ")")
             rank = "bm25(user_fts)"
         rel = P.choice("rel", tuple(self.RELATIONS), "conversou")
+        jm = join_mode(P)
         rel_user = P.str("rel_user", maxlen=60).strip().lower()
         rel_label = None
         if rel_user:
-            label, sql, unit = self.RELATIONS[rel]
+            label, _, unit = self.RELATIONS[rel]
             rel_label = unit
-            joins = f" JOIN ({sql}) rel ON rel.k = u.name_lc" + joins
-            args = [rel_user] + args
+            rel_key = self.key_of(rel_user, jm)
+            joins = f" JOIN ({self.rel_sql(rel, jm)}) rel ON rel.k = u.name_lc" + joins
+            args = [rel_key] + args
             where.append("u.name_lc <> ?")
-            args.append(rel_user)
+            args.append(rel_key)
             if (n := P.int("rel_min", 1)):
                 where.append("rel.c >= ?")
                 args.append(n)
@@ -963,7 +1038,10 @@ class SearchPages:
             page = P.page()
             try:
                 total = self.run(f"SELECT COUNT(*) FROM {frm} WHERE {w}", args)[0][0]
-                rows = self.run(f"""SELECT u.*, {rel_col} AS relc FROM {frm} WHERE {w}
+                kc = KEY_COL[jm]
+                same = (f"(SELECT group_concat(i.name, ', ') FROM s.ident i WHERE i.{kc} = u.name_lc "
+                        f"AND i.name_lc <> u.name_lc)" if jm != "nome" else "NULL")
+                rows = self.run(f"""SELECT u.*, {rel_col} AS relc, {same} AS same FROM {frm} WHERE {w}
                                     ORDER BY {key}, u.posts_found DESC, u.name LIMIT ? OFFSET ?""",
                                 args + [PER_PAGE, (page - 1) * PER_PAGE])
                 groups = self.run(f"""SELECT u.groups, COUNT(*) FROM {frm} WHERE {w} AND u.groups IS NOT NULL
@@ -990,9 +1068,10 @@ class SearchPages:
                             "curtido": dict(autor=u["name"], curtida_por=rel_user),
                             "respondeu": dict(autor=u["name"], em_topicos_de=rel_user, tipo="respostas"),
                             "respondido": dict(autor=rel_user, em_topicos_de=u["name"], tipo="respostas")}[rel]
+                    relq["juntar"] = jm
                     relcell = f'<td class="num"><a href="/busca/mensagens?{e(urlencode(relq))}">{u["relc"]}</a></td>'
                 trs.append(f"""<tr><td>{member_link(u['name'], m)}{'<span class="tag new">local</span>' if u['is_local'] else ''}
-<div class="small">{e(grp)}{(' · desde ' + e(fmt_date(u['joined'])[:10])) if u['joined'] else ''}</div></td>{relcell}
+<div class="small">{e(grp)}{(' · desde ' + e(fmt_date(u['joined'])[:10])) if u['joined'] else ''}</div>{('<div class="small" title="nomes juntados">+ ' + e(u['same']) + '</div>') if u['same'] else ''}</td>{relcell}
 <td class="num">{e(u['post_count'] if u['post_count'] is not None else '–')}</td>
 <td class="num v">{u['posts_found']}</td><td class="num v">{e(u['reputation'] if u['reputation'] is not None else '–')}</td>
 <td class="num v">{u['quotes_recv']}</td><td class="last">{e(fmt_date(u['last_post'])) or '–'}</td></tr>""")
@@ -1037,7 +1116,8 @@ class SearchPages:
 <fieldset><legend>Correlação</legend>
 <label>Usuários que…<select name="rel">{ropts}</select></label>
 <label>…o usuário</label>{inp('rel_user', P, placeholder='ex.: saim')}
-<label>Pelo menos (vezes)</label>{inp('rel_min', P, 'number', min='1', placeholder='1')}</fieldset>
+<label>Pelo menos (vezes)</label>{inp('rel_min', P, 'number', min='1', placeholder='1')}
+{join_select(P)}</fieldset>
 <fieldset><legend>Perfil</legend>
 <label>Texto no perfil/assinatura</label>{inp('perfil', P, placeholder='ex.: programador, "rpg maker"')}
 <label>Grupo<select name="grupo">{gopts}</select></label><label>Cargo<select name="cargo">{copts}</select></label>
@@ -1052,28 +1132,43 @@ class SearchPages:
 </div><div style="margin-top:10px"><button>Buscar</button> <a href="{path}" class="small">limpar</a></div></details></form>"""
 
     # ===================================================== perfil: correlações
-    def member_correlations(self, name: str) -> str:
+    def member_correlations(self, name: str, mode: str = "pessoa") -> str:
         if not self.ready():
             return ""
-        key = name.lower()
-        u = self.db.execute("SELECT * FROM s.um WHERE name_lc = ?", (key,)).fetchone()
-        if not u or not u["posts_found"]:
+        mode = mode if mode in SUFFIX else "pessoa"
+        sfx, tpt = SUFFIX[mode], TP_TABLE[mode]
+        key = self.key_of(name, mode)
+        one = lambda sql, *a: self.db.execute(sql, a).fetchone()[0]
+        posts = one(f"SELECT COUNT(*) FROM s.pm WHERE author_{sfx} = ?", key)
+        if not posts:
             return ""
+        stats = {
+            "posts": posts,
+            "started": one(f"SELECT COUNT(*) FROM s.tm WHERE author_{sfx} = ?", key),
+            "topics": one(f"SELECT COUNT(*) FROM s.{tpt} WHERE author_lc = ?", key),
+            "qg": one(f"SELECT COUNT(*) FROM s.quotes WHERE quoter_{sfx} = ? AND quoted_{sfx} <> quoter_{sfx}", key),
+            "qr": one(f"SELECT COUNT(*) FROM s.quotes WHERE quoted_{sfx} = ? AND quoted_{sfx} <> quoter_{sfx}", key),
+            "lg": one(f"SELECT COUNT(*) FROM s.likes WHERE liker_{sfx} = ? AND liked_{sfx} <> liker_{sfx}", key),
+            "lr": one(f"SELECT COUNT(*) FROM s.likes WHERE liked_{sfx} = ? AND liked_{sfx} <> liker_{sfx}", key),
+        }
+        first, last = self.db.execute(f"SELECT MIN(date), MAX(date) FROM s.pm WHERE author_{sfx} = ?", (key,)).fetchone()
 
         def top(rel, n=8):
-            sql = self.RELATIONS[rel][1]
             return self.db.execute(
-                f"SELECT COALESCE(m.name, x.k) AS name, x.c FROM ({sql}) x LEFT JOIN s.um m ON m.name_lc = x.k "
-                f"WHERE x.k <> ? AND x.k IS NOT NULL ORDER BY x.c DESC LIMIT {n}", (key, key)).fetchall()
+                f"""SELECT COALESCE(i.name, x.k) AS name, x.c FROM ({self.rel_sql(rel, mode)}) x
+                    LEFT JOIN s.ident i ON i.name_lc = x.k
+                    WHERE x.k <> ? AND x.k IS NOT NULL AND x.k NOT IN ('convidado', 'convidad')
+                    ORDER BY x.c DESC LIMIT {n}""", (key, key)).fetchall()
 
         def box(title, rel, rows, link):
             if not rows:
                 return ""
             lis = "".join(f'<li>{member_link(r["name"])}<a href="{e(link(r["name"]))}">{r["c"]}</a></li>' for r in rows)
-            more = f'<li><a href="/busca/usuarios?{e(urlencode(dict(rel_user=name, rel=rel)))}">ver todos…</a></li>'
+            more = (f'<li><a href="/busca/usuarios?{e(urlencode(dict(rel_user=name, rel=rel, juntar=mode)))}">'
+                    f'ver todos…</a></li>')
             return f'<div class="box"><h2>{e(title)}</h2><ul>{lis}{more}</ul></div>'
 
-        q = lambda **kw: "/busca/mensagens?" + urlencode(kw)
+        q = lambda **kw: "/busca/mensagens?" + urlencode({**kw, "juntar": mode})
         boxes = [
             box("Mais conversou com", "conversou", top("conversou"),
                 lambda n: q(autor=name, com_participante=n, agrupar=1)),
@@ -1087,26 +1182,38 @@ class SearchPages:
             box("Curtido por", "curtiu", top("curtiu"), lambda n: q(autor=name, curtida_por=n)),
         ]
         names = self.forum_names()
-        fr = self.db.execute("""SELECT forum_id, COUNT(*) c FROM s.pm WHERE author_lc = ?
-                                GROUP BY forum_id ORDER BY c DESC LIMIT 10""", (key,)).fetchall()
+        fr = self.db.execute(f"""SELECT forum_id, COUNT(*) c FROM s.pm WHERE author_{sfx} = ?
+                                 GROUP BY forum_id ORDER BY c DESC LIMIT 10""", (key,)).fetchall()
         if fr:
             lis = "".join(f'<li><a href="{e(q(autor=name, forum=r[0], subforuns=0))}">{e(names.get(r[0], "?"))}</a>'
                           f'<span>{r[1]}</span></li>' for r in fr)
             boxes.insert(0, f'<div class="box"><h2>Onde mais postou</h2><ul>{lis}</ul></div>')
-        years = self.db.execute("""SELECT substr(date, 1, 4), COUNT(*) FROM s.pm WHERE author_lc = ?
-                                   GROUP BY 1 ORDER BY 1""", (key,)).fetchall()
+        years = self.db.execute(f"""SELECT substr(date, 1, 4), COUNT(*) FROM s.pm WHERE author_{sfx} = ?
+                                    GROUP BY 1 ORDER BY 1""", (key,)).fetchall()
         boxes.insert(1, year_bars("Mensagens por ano", [(r[0], r[1]) for r in years],
                                   lambda y: q(autor=name, ano=y)))
-        stats = (f'<div class="stats"><span><b>{u["posts_found"]}</b> mensagens arquivadas</span>'
-                 f'<span><b>{u["topics_started"]}</b> tópicos criados</span>'
-                 f'<span><b>{u["topics_in"]}</b> tópicos com participação</span>'
-                 f'<span><b>{u["quotes_given"]}</b> citações feitas / <b>{u["quotes_recv"]}</b> recebidas</span>'
-                 f'<span><b>{u["likes_given"]}</b> curtidas dadas / <b>{u["likes_recv"]}</b> recebidas</span>'
-                 f'<span>{e(fmt_date(u["first_post"]))} → {e(fmt_date(u["last_post"]))}</span></div>')
+        sv = (f'<div class="stats"><span><b>{stats["posts"]}</b> mensagens arquivadas</span>'
+              f'<span><b>{stats["started"]}</b> tópicos criados</span>'
+              f'<span><b>{stats["topics"]}</b> tópicos com participação</span>'
+              f'<span><b>{stats["qg"]}</b> citações feitas / <b>{stats["qr"]}</b> recebidas</span>'
+              f'<span><b>{stats["lg"]}</b> curtidas dadas / <b>{stats["lr"]}</b> recebidas</span>'
+              f'<span>{e(fmt_date(first))} → {e(fmt_date(last))}</span></div>')
+        # modo de junção e nomes considerados
+        switch = " · ".join(
+            (f"<b>{e(lbl)}</b>" if k == mode else f'<a href="/membro/{quote(name)}?juntar={k}">{e(lbl)}</a>')
+            for k, lbl in JOIN_MODES)
+        same = self.same_names(key, mode)
+        if key != name.lower():
+            same = [n for n in same if n.lower() != name.lower()]
+            rep_name = self.key_labels([key]).get(key, key)
+            same = [rep_name] + same
+        joined = (f'<div class="small" style="margin-top:4px">Contando também: '
+                  + ", ".join(member_link(n) for n in same) + "</div>") if same else ""
         links = (f'<div class="chips"><a href="{e(q(autor=name))}">todas as mensagens</a>'
-                 f'<a href="/busca/topicos?{e(urlencode(dict(autor=name)))}">tópicos criados</a>'
-                 f'<a href="/busca/topicos?{e(urlencode(dict(participantes=name)))}">tópicos em que participou</a>'
+                 f'<a href="/busca/topicos?{e(urlencode(dict(autor=name, juntar=mode)))}">tópicos criados</a>'
+                 f'<a href="/busca/topicos?{e(urlencode(dict(participantes=name, juntar=mode)))}">tópicos em que participou</a>'
                  f'<a href="{e(q(cita=name))}">mensagens que o citam</a></div>')
         grid = "".join(b for b in boxes if b)
-        return (CSS + f'<div class="box"><h2>Atividade e correlações</h2>{stats}<div style="padding:0 12px">{links}</div></div>'
+        return (CSS + f'<div class="box"><h2>Atividade e correlações</h2>{sv}'
+                f'<div style="padding:0 12px 10px"><div class="small">Juntar nomes: {switch}</div>{joined}{links}</div></div>'
                 f'<div class="facets" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:0 16px">{grid}</div>')

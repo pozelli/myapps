@@ -290,7 +290,13 @@ INSERT INTO topics (id,forum_id,title,prefix,topic_type,replies_forum,views_foru
 INSERT INTO posts (id,topic_id,position,title,author_id,author_name,date,content_html,content_text,has_signature) VALUES
   (100,10,0,'Motor',1,'Ana','2020-01-01T10:00:00','<p>Olá mundo</p>','Olá mundo',1),
   (101,10,1,'Re',2,'Bia','2020-01-02T10:00:00','<blockquote><div><cite>Ana escreveu:</cite>Olá</div></blockquote>boa ideia','boa ideia',0),
-  (102,10,2,'Re',NULL,'Convidado','2020-01-03T10:00:00','<p>sou eu mesmo</p>','sou eu mesmo',0);
+  (102,10,2,'Re',NULL,'Convidado','2020-01-03T10:00:00','<p>sou eu mesmo</p>','sou eu mesmo',0),
+  (103,10,3,'Re',2,'Bia','2020-01-04T10:00:00','<blockquote><div><cite>AnaVelha escreveu:</cite>antigo</div></blockquote>lembro','lembro',0),
+  (104,10,4,'Re',2,'Bia','2020-01-05T10:00:00','<blockquote><div><cite>Fantasma escreveu:</cite>boo</div></blockquote>vi','vi',0),
+  (105,10,5,'Re',2,'Bia','2020-01-06T10:00:00','<blockquote><div><cite>Reusado escreveu:</cite>x</div></blockquote>ok','ok',0);
+-- 'Reusado' foi nick da Ana e virou outra conta só em 2030: a citação de 2020 é da Ana
+INSERT INTO members (user_id,name,joined_date,sidebar_fields,profile_fields) VALUES (3,'Reusado','2030-01-01','{}','{}');
+INSERT INTO account_aliases VALUES ('Reusado',1,'citações',2);
 INSERT INTO post_likes VALUES (100,'Bia',2);
 INSERT INTO polls VALUES (10,'Qual engine?',0,NULL);
 INSERT INTO poll_options VALUES (10,0,'GameMaker',3),(10,1,'Godot',1);
@@ -349,9 +355,29 @@ class SchemaV5Test(unittest.TestCase):
         self.assertIn("com confiança alta", html)
         self.assertIn("Bia", self.get("/membros")[1])
 
+    def test_join_names(self):
+        # Ana = AnaVelha (nick antigo da conta) = Fantasma (mesma pessoa)
+        self.assertIn("4 mensagens", self.get("/busca/mensagens?cita=ana")[1])
+        self.assertIn("3 mensagens", self.get("/busca/mensagens?cita=ana&juntar=conta")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?cita=ana&juntar=nome")[1])
+        self.assertIn("4 mensagens", self.get("/busca/mensagens?cita=Fantasma")[1])
+        # a conta nova 'Reusado' não herda a citação antiga
+        self.assertIn("0 mensagens", self.get("/busca/mensagens?cita=Reusado&juntar=conta")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?cita=Reusado&juntar=nome")[1])
+        html = self.get("/busca/usuarios?rel_user=Fantasma&rel=citou")[1]
+        self.assertIn("1 usuários", html)
+        self.assertIn('<a href="/busca/mensagens?', html)
+        self.assertIn(">4</a>", html)                     # Bia citou 4 vezes a pessoa
+        html = self.get("/membro/Ana")[1]
+        self.assertIn("4</b> recebidas", html)
+        self.assertIn("Contando também", html)
+        self.assertIn("AnaVelha", html)
+        html = self.get("/membro/Ana?juntar=nome")[1]
+        self.assertIn("1</b> recebidas", html)
+
     def test_search(self):
         self.assertIn("1 mensagens", self.get("/busca/mensagens?curtida_por=bia")[1])
-        self.assertIn("1 mensagens", self.get("/busca/mensagens?cita=ana")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?cita=ana&juntar=nome")[1])
         self.assertIn("1 tópicos", self.get("/busca/topicos?enquete=sim&trancado=sim")[1])
         self.assertIn("1 usuários", self.get("/busca/usuarios?grupo=Lendas")[1])
         self.post("/t/10/responder", {"nome": "Caio", "texto": "nova resposta aqui"})

@@ -62,6 +62,15 @@ chips com os filtros ativos.
   membro mostra onde ele mais postou, mensagens por ano e os principais
   parceiros em cada tipo de relação.
 
+- **Juntar nomes** (buscas e perfil): por padrão, as correlações contam
+  juntos os nomes **da mesma pessoa** — nicks antigos da conta
+  (`account_aliases`) e outras contas ligadas em `persons`/`person_names`.
+  Dá para escolher **da mesma conta** (só nicks antigos) ou **não juntar**.
+  Cada nome aponta para um representante (a conta com mais mensagens); as
+  citações, curtidas, participações e respostas são somadas por ele. Quando
+  um nick antigo virou nome de outra conta depois (recadastro), as citações
+  feitas antes da criação dessa conta ficam com o dono antigo do nick.
+
 O índice (`data/search.sqlite`, ~270 MB, ~30 s para criar) é derivado do
 banco do scraper e reconstruído automaticamente quando o banco muda. Mensagens
 novas entram no índice na hora. Para reconstruir manualmente:
