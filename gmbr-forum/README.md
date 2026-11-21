@@ -8,7 +8,10 @@ Só usa a biblioteca padrão do Python (3.9+), sem dependências.
 - **Fórum** com a lista de tópicos (fixos primeiro, depois por atividade).
 - **Tópico** com mensagens, perfil do autor, assinatura e edições. Links internos
   do gmbr (`/t123-...`) apontam para o próprio fórum local.
-- **Membros**, **perfil** com as mensagens arquivadas, **busca** e **recentes**.
+- **Membros**, **perfil** (com os campos completos da página /uNN quando o
+  scraper já os coletou) e as mensagens arquivadas, **busca** e **recentes**.
+- **Enquetes**, **prefixos** (ex.: `[Votação]`) e tópicos **trancados**, quando
+  o banco tem essas informações. Bancos de versões antigas do scraper também funcionam.
 - **Mensagens novas**: dá para criar tópicos e responder (inclusive em tópicos
   do arquivo). Ficam num banco separado (`data/local.sqlite`); o banco do
   scraper é aberto **só para leitura** e pode ser trocado por um backup mais

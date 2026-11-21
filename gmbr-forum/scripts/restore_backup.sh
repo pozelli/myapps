@@ -21,6 +21,7 @@ git show FETCH_HEAD:SHA256SUMS > "$tmp/SHA256SUMS"
 cat "$tmp"/gmbr.sqlite.gz.enc.part-* \
   | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass "file:$KEY" \
   | gunzip > data/gmbr.sqlite.new
+rm -f data/gmbr.sqlite-wal data/gmbr.sqlite-shm
 mv data/gmbr.sqlite.new data/gmbr.sqlite
 echo "Restaurado: data/gmbr.sqlite ($(du -h data/gmbr.sqlite | cut -f1))"
 git show FETCH_HEAD:README.md | awk '/^```$/{n++; next} n==1'

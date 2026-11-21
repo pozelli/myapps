@@ -34,7 +34,10 @@ def _url(value: str) -> str | None:
     value = (value or "").strip()
     if not value or value.startswith("#"):
         return value or None
-    url = urljoin(BASE, value)
+    try:
+        url = urljoin(BASE, value)
+    except ValueError:  # URL malformada (ex.: "http://[x")
+        return None
     if not re.match(r"^https?://", url, re.I):
         return None  # javascript:, data:, etc.
     m = TOPIC_LINK.match(url)

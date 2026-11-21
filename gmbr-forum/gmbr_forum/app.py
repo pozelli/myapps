@@ -75,6 +75,18 @@ class Forum:
         self._write_lock = threading.Lock()
         with sqlite3.connect(local_path) as c:
             c.executescript(LOCAL_SCHEMA)
+        # Colunas/tabelas que só existem em versões mais novas do scraper
+        ro = sqlite3.connect(f"file:{quote(archive_path)}?mode=ro", uri=True)
+        cols = lambda t: {r[1] for r in ro.execute(f"PRAGMA table_info({t})")}
+        topic_cols, member_cols = cols("topics"), cols("members")
+        self.has_polls = bool(cols("polls")) and bool(cols("poll_options"))
+        ro.close()
+        opt = lambda name, have: f"t.{name}" if name in have else f"NULL"
+        self.topic_extra = (f"{opt('prefix', topic_cols)} AS prefix, "
+                            f"{opt('topic_type', topic_cols)} AS topic_type")
+        self.member_extra = ", ".join(
+            f"m.{c}" if c in member_cols else f"NULL AS {c}"
+            for c in ("humor", "last_visit_raw", "profile_fields", "profile_groups"))
 
     @property
     def db(self) -> sqlite3.Connection:
@@ -115,8 +127,10 @@ class Forum:
                FROM topics WHERE forum_id=? ORDER BY last_post_date DESC LIMIT 1""",
             (fid,)).fetchone()
 
-    TOPIC_UNION = """
-        SELECT 't' || t.id AS ref, t.id, t.title, t.description, t.author_name AS author,
+    @property
+    def TOPIC_UNION(self) -> str:
+        return f"""
+        SELECT 't' || t.id AS ref, {self.topic_extra}, t.id, t.title, t.description, t.author_name AS author,
                t.section,
                COALESCE(t.replies, 0) + (SELECT COUNT(*) FROM loc.new_posts p
                                          WHERE p.topic_ref = 't' || t.id) AS replies,
@@ -127,7 +141,7 @@ class Forum:
                t.last_post_author AS last_author, t.forum_id
         FROM topics t
         UNION ALL
-        SELECT 'n' || n.id, n.id, n.title, NULL, n.author, NULL,
+        SELECT 'n' || n.id, NULL, NULL, n.id, n.title, NULL, n.author, NULL,
                (SELECT COUNT(*) FROM loc.new_posts p WHERE p.topic_ref = 'n' || n.id) - 1,
                NULL, 1, 0,
                (SELECT MAX(created) FROM loc.new_posts p WHERE p.topic_ref = 'n' || n.id),
@@ -193,9 +207,19 @@ class Forum:
             return {}
         q = ",".join("?" * len(names))
         return {r["name"]: r for r in self.db.execute(
-            f"""SELECT m.*, g.name AS group_name, g.color AS group_color
+            f"""SELECT m.*, {self.member_extra}, g.name AS group_name, g.color AS group_color
                 FROM members m LEFT JOIN groups g ON g.class = m.group_class
                 WHERE m.name IN ({q})""", names)}
+
+    def poll(self, tid: int):
+        if not self.has_polls:
+            return None, []
+        p = self.db.execute("SELECT * FROM polls WHERE topic_id=?", (tid,)).fetchone()
+        if not p:
+            return None, []
+        opts = self.db.execute("SELECT * FROM poll_options WHERE topic_id=? ORDER BY position",
+                               (tid,)).fetchall()
+        return p, opts
 
     def member(self, name: str):
         return self.members_by_name([name]).get(name)
@@ -315,6 +339,9 @@ form.reply .row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}form.reply
 .stats{display:flex;gap:24px;padding:10px 12px;font-size:14px;color:var(--muted);flex-wrap:wrap}
 .stats b{color:var(--ink)}
 footer{color:var(--muted);font-size:13px;text-align:center;padding:24px 0}
+.poll{padding:12px}.poll .opt{margin-bottom:10px}
+.poll .bar{height:8px;background:var(--alt);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin-top:3px}
+.poll .bar span{display:block;height:100%;background:var(--head2)}
 .hit{padding:10px 12px;border-bottom:1px solid var(--line)}.hit p{margin:4px 0 0;font-size:14px}
 @media (max-width:700px){td.last,th.last,td.num.v,th.v{display:none}
 .post{flex-direction:column}.post .who{width:auto;border-right:0;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;text-align:left}
@@ -422,10 +449,12 @@ class Pages:
                 tags += '<span class="tag new">novo</span>'
             elif not t["scraped"]:
                 tags += '<span class="tag">não arquivado</span>'
+            if t["topic_type"] and "locked" in t["topic_type"]:
+                tags += '<span class="tag">trancado</span>'
             if t["section"] and ("Fixo" in t["section"] or "Anúncio" in t["section"]):
                 tags += f'<span class="tag">{e(t["section"])}</span>'
             desc = f'<div class="desc">{e(t["description"])}</div>' if t["description"] else ""
-            out.append(f"""<tr><td><a class="title" href="{topic_href(t['ref'])}">{e(t['title'])}</a>{tags}{desc}
+            out.append(f"""<tr><td>{(e(t['prefix']) + ' ') if t['prefix'] else ''}<a class="title" href="{topic_href(t['ref'])}">{e(t['title'])}</a>{tags}{desc}
 <div class="small">por {member_link(t['author'])}</div></td>
 <td class="num">{max(t['replies'] or 0, 0)}</td><td class="num v">{e(t['views'] if t['views'] is not None else '–')}</td>
 <td class="last">{member_link(t['last_author'])}<br>{e(fmt_date(t['last_date']))}</td></tr>""")
@@ -488,6 +517,8 @@ class Pages:
                           f'({t["posts_scraped"] or 0} de {(t["replies"] or 0) + 1} mensagens). '
                           f'<a href="{e(orig)}" rel="noreferrer" target="_blank">Ver no fórum original</a>.</div>')
         html = [notice]
+        if ref[0] == "t" and page == 1:
+            html.append(self.render_poll(*self.f.poll(int(ref[1:]))))
         pg = pager(topic_href(ref), page, total, POSTS_PER_PAGE)
         html.append(pg)
         for p in posts:
@@ -498,6 +529,20 @@ class Pages:
 <textarea name="texto" required maxlength="20000" placeholder="Mensagem"></textarea>
 <div><button>Enviar resposta</button></div></form></div>""")
         return layout(title or "Tópico", f"<h2>{e(title)}</h2>" + "".join(html), crumbs)
+
+    def render_poll(self, poll, opts) -> str:
+        if not poll:
+            return ""
+        rows = []
+        for o in opts:
+            pct = o["percent"] if o["percent"] is not None else (
+                100 * (o["votes"] or 0) / poll["total_votes"] if poll["total_votes"] else 0)
+            rows.append(f"""<div class="opt"><div>{e(o['text'])}<span class="small"> · {e(o['votes'] if o['votes'] is not None else '?')} votos ({pct:.0f}%)</span></div>
+<div class="bar"><span style="width:{max(0, min(100, pct)):.1f}%"></span></div></div>""")
+        total = f"Total de votos: {e(poll['total_votes'])}" if poll["total_votes"] is not None else ""
+        closed = " · encerrada" if poll["closed"] else ""
+        return f"""<div class="box"><h2>Enquete: {e(poll['question'])}</h2><div class="poll">{''.join(rows)}
+<div class="small">{total}{closed}</div></div></div>"""
 
     def render_post(self, p, m) -> str:
         who = [f'<span class="name">{member_link(p["author"], m)}</span>']
@@ -573,6 +618,33 @@ class Pages:
             for k, v in extra.items():
                 if v not in ("", "0", None):
                     info.append(f"<div><b>{e(k)}:</b> {e(v)}</div>")
+            if m["last_visit_raw"]:
+                info.append(f"<div><b>Último acesso:</b> {e(m['last_visit_raw'])}</div>")
+            try:
+                groups = json.loads(m["profile_groups"] or "[]")
+            except ValueError:
+                groups = []
+            if groups:
+                info.append("<div><b>Grupos:</b> " + ", ".join(e(g.get("name")) for g in groups if isinstance(g, dict)) + "</div>")
+            try:
+                fields = json.loads(m["profile_fields"] or "{}")
+            except ValueError:
+                fields = {}
+            shown = {"Rank", "Estado", "Data de inscrição", "Reputação", "Número de Mensagens",
+                     "Última visita", "Último acesso"}
+            for k, v in fields.items():
+                if k in shown or k in extra or v in (None, "", "0", {}):
+                    continue
+                if isinstance(v, dict):
+                    imgs = "".join(f'<img src="{e(u)}" alt="" style="max-height:40px;vertical-align:middle" referrerpolicy="no-referrer">'
+                                   for u in (v.get("images") or []) if str(u).startswith("http"))
+                    v_html = (e(v.get("text") or "") + " " + imgs).strip()
+                elif isinstance(v, list):
+                    v_html = e(", ".join(map(str, v)))
+                else:
+                    v_html = e(v).replace("\n", "<br>")
+                if v_html:
+                    info.append(f"<div><b>{e(k)}:</b> {v_html}</div>")
             if m["signature_html"]:
                 info.append(f'<div class="sig">{clean_html(m["signature_html"])}</div>')
         hits = "".join(self.hit(p) for p in posts) or '<div class="hit">Nenhuma mensagem arquivada.</div>'

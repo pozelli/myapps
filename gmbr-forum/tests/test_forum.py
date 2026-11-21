@@ -55,6 +55,9 @@ class SanitizeTest(unittest.TestCase):
         self.assertIn('href="/t/123?start=30"',
                       clean_html('<a href="https://gmbr.forumeiros.com/t123p30-titulo">x</a>'))
 
+    def test_bad_url(self):
+        self.assertEqual(clean_html('<a href="http://[bad">x</a>'), "<a>x</a>")
+
     def test_style_filter(self):
         out = clean_html('<span style="color: red; background:url(x)">a</span>')
         self.assertIn('style="color: red"', out)
@@ -120,6 +123,48 @@ class ServerTest(unittest.TestCase):
         self.assertIn("nova resposta", html)
         self.assertIn("Motor de plataforma", self.get("/recentes")[1])
         self.assertIn("&lt;i&gt;Oi&lt;/i&gt;", self.get("/f/1")[1])
+
+
+class NewSchemaTest(ServerTest):
+    """Banco de versões novas do scraper: prefixo, enquetes e perfil completo."""
+
+    @classmethod
+    def setUpClass(cls):
+        global SCHEMA
+        old = SCHEMA
+        SCHEMA = old + """
+ALTER TABLE topics ADD COLUMN prefix TEXT; ALTER TABLE topics ADD COLUMN topic_type TEXT;
+ALTER TABLE members ADD COLUMN humor TEXT; ALTER TABLE members ADD COLUMN last_visit_raw TEXT;
+ALTER TABLE members ADD COLUMN profile_fields TEXT; ALTER TABLE members ADD COLUMN profile_groups TEXT;
+CREATE TABLE polls (topic_id INTEGER PRIMARY KEY, question TEXT, total_votes INTEGER, closed INTEGER, scraped_at TEXT);
+CREATE TABLE poll_options (topic_id INTEGER, position INTEGER, text TEXT, votes INTEGER, percent REAL,
+  PRIMARY KEY (topic_id, position));
+UPDATE topics SET prefix='[Votação]', topic_type='topic_read_locked' WHERE id=10;
+UPDATE members SET last_visit_raw='Hoje', profile_groups='[{"id": 11, "name": "Lendas"}]',
+  profile_fields='{"Quem sou eu": "Programadora", "Moedas": "5", "Games Ranking": {"text": null, "images": ["https://i.example/x.png"]}}'
+  WHERE name='Ana';
+INSERT INTO polls VALUES (10,'Qual engine?',4,1,NULL);
+INSERT INTO poll_options VALUES (10,0,'GameMaker',3,75.0),(10,1,'Godot',1,25.0);
+"""
+        try:
+            super().setUpClass()
+        finally:
+            SCHEMA = old
+
+    def test_new_fields(self):
+        html = self.get("/f/1")[1]
+        self.assertIn("[Votação]", html)
+        self.assertIn("trancado", html)
+        html = self.get("/t/10")[1]
+        self.assertIn("Enquete: Qual engine?", html)
+        self.assertIn("75%", html)
+        self.assertIn("encerrada", html)
+        html = self.get("/membro/Ana")[1]
+        self.assertIn("Programadora", html)
+        self.assertIn("Lendas", html)
+        self.assertIn("Último acesso", html)
+        self.assertIn("https://i.example/x.png", html)
+        self.assertEqual(html.count("Moedas"), 1)
 
 
 if __name__ == "__main__":
