@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from math import ceil
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from . import compat
 from .sanitize import clean_html
 
 TOPICS_PER_PAGE = 40
@@ -79,9 +80,21 @@ class Forum:
             c.executescript(LOCAL_SCHEMA)
         # Colunas/tabelas que só existem em versões mais novas do scraper
         ro = sqlite3.connect(f"file:{quote(archive_path)}?mode=ro", uri=True)
-        cols = lambda t: {r[1] for r in ro.execute(f"PRAGMA table_info({t})")}
-        topic_cols, member_cols = cols("topics"), cols("members")
-        self.has_polls = bool(cols("polls")) and bool(cols("poll_options"))
+        self.compat = compat.needs_compat(ro)
+        names = {r[0] for r in ro.execute("SELECT name FROM sqlite_master")}
+        # Identidade (schema 3+): autores prováveis de mensagens de convidado,
+        # nicks antigos e contas da mesma pessoa
+        self.has_guesses = "v_post_author_best" in names
+        self.has_aliases = "account_aliases" in names
+        self.has_persons = {"persons", "person_names"} <= names
+        if self.compat:  # schema 2+: as VIEWs de compat.py têm todas as colunas
+            topic_cols = {"prefix", "topic_type"}
+            member_cols = {"humor", "last_visit_raw", "profile_fields", "profile_groups"}
+            self.has_polls = True
+        else:
+            cols = lambda t: {r[1] for r in ro.execute(f"PRAGMA table_info({t})")}
+            topic_cols, member_cols = cols("topics"), cols("members")
+            self.has_polls = bool(cols("polls")) and bool(cols("poll_options"))
         ro.close()
         opt = lambda name, have: f"t.{name}" if name in have else f"NULL"
         self.topic_extra = (f"{opt('prefix', topic_cols)} AS prefix, "
@@ -98,8 +111,11 @@ class Forum:
             c = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
             c.row_factory = sqlite3.Row
             c.execute("ATTACH DATABASE ? AS loc", (self.local_path,))
-            if self.index_path and os.path.exists(self.index_path):
+            has_index = bool(self.index_path and os.path.exists(self.index_path))
+            if has_index:
                 c.execute("ATTACH DATABASE ? AS s", (self.index_path,))
+            if self.compat:
+                compat.prepare(c, "s" if has_index else None)
             self._tls.conn = c
         return c
 
@@ -225,6 +241,38 @@ class Forum:
                                (tid,)).fetchall()
         return p, opts
 
+    def author_guesses(self, post_ids) -> dict[int, sqlite3.Row]:
+        ids = [i for i in post_ids if i and i > 0]
+        if not self.has_guesses or not ids:
+            return {}
+        q = ",".join("?" * len(ids))
+        return {r["post_id"]: r for r in self.db.execute(
+            f"""SELECT g.*, m.name AS member_name FROM main.v_post_author_best g
+                LEFT JOIN main.members m ON m.user_id = g.user_id
+                WHERE g.post_id IN ({q})""", ids)}
+
+    def identity(self, name: str, user_id) -> dict:
+        out: dict = {"aliases": [], "person": None, "names": [], "guessed": []}
+        if self.has_aliases and user_id is not None:
+            out["aliases"] = self.db.execute(
+                "SELECT name, source, evidence FROM main.account_aliases WHERE user_id = ? "
+                "AND lower(name) <> lower(?) ORDER BY evidence DESC", (user_id, name)).fetchall()
+        if self.has_persons:
+            pid = self.db.execute("SELECT person_id FROM main.person_names WHERE lower(name) = lower(?)",
+                                  (name,)).fetchone()
+            if pid:
+                out["person"] = self.db.execute("SELECT * FROM main.persons WHERE id = ?", (pid[0],)).fetchone()
+                out["names"] = self.db.execute(
+                    """SELECT pn.name, pn.certainty,
+                              (SELECT COUNT(*) FROM main.members m WHERE m.name = pn.name) AS is_member
+                       FROM main.person_names pn WHERE pn.person_id = ? AND lower(pn.name) <> lower(?)
+                       ORDER BY pn.certainty DESC, pn.name""", (pid[0], name)).fetchall()
+        if self.has_guesses:
+            out["guessed"] = self.db.execute(
+                """SELECT confidence, COUNT(*) AS n FROM main.v_post_author_best
+                   WHERE lower(name) = lower(?) GROUP BY confidence""", (name,)).fetchall()
+        return out
+
     def member(self, name: str):
         return self.members_by_name([name]).get(name)
 
@@ -236,7 +284,7 @@ class Forum:
             args.append("%" + re.sub(r"([%_\\])", r"\\\1", q) + "%")
         rows = self.db.execute(
             """SELECT m.*, g.name AS group_name, g.color AS group_color,
-                      (SELECT COUNT(*) FROM posts p WHERE p.author_name = m.name) AS found
+                      (SELECT COUNT(*) FROM main.posts p WHERE p.author_name = m.name) AS found
                FROM members m LEFT JOIN groups g ON g.class = m.group_class
                WHERE {where}
                ORDER BY COALESCE(m.post_count, 0) DESC, m.name LIMIT ? OFFSET ?""".replace("{where}", where),
@@ -340,6 +388,8 @@ td.last{width:220px;font-size:13px;color:var(--muted)}
 .content blockquote,.content dl.codebox,.content .codebox{background:var(--quote);border-left:3px solid var(--line);margin:8px 0;padding:6px 10px}
 .content pre,.content code{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:13px}
 .content table{max-width:100%}
+.guess{margin-top:8px;padding-top:6px;border-top:1px dashed var(--line);font-size:12px}
+.conf{font-weight:600}.conf.alta{color:#2e7d32}.conf.média{color:#b26a00}.conf.baixa{color:var(--muted)}
 .sig{margin-top:14px;padding-top:8px;border-top:1px dashed var(--line);font-size:13px;color:var(--muted);max-height:220px;overflow:hidden}
 .sig img{max-width:100%;max-height:150px}
 .edit{font-size:12px;color:var(--muted);font-style:italic;margin-top:10px}
@@ -528,6 +578,8 @@ class Pages:
             page = start // POSTS_PER_PAGE + 1
         posts, total = self.f.posts(ref, page)
         members = self.f.members_by_name(p["author"] for p in posts)
+        guesses = self.f.author_guesses(
+            p["id"] for p in posts if p["kind"] == "a" and p["author"] not in members)
         crumbs = [("Índice", "/")]
         if fid and (fr := self.f.forum(fid)):
             crumbs.append((fr["name"], f"/f/{fr['id']}"))
@@ -545,7 +597,8 @@ class Pages:
         pg = pager(topic_href(ref), page, total, POSTS_PER_PAGE)
         html.append(pg)
         for p in posts:
-            html.append(self.render_post(p, members.get(p["author"])))
+            html.append(self.render_post(p, members.get(p["author"]),
+                                         guesses.get(p["id"]) if p["kind"] == "a" else None))
         html.append(pg)
         html.append(f"""<div class="box"><h2>Responder</h2><form class="reply" method="post" action="{topic_href(ref)}/responder">
 <div class="row"><input name="nome" required maxlength="40" placeholder="Seu nome" value="{e(name_form_default(h))}"></div>
@@ -567,7 +620,20 @@ class Pages:
         return f"""<div class="box"><h2>Enquete: {e(poll['question'])}</h2><div class="poll">{''.join(rows)}
 <div class="small">{total}{closed}</div></div></div>"""
 
-    def render_post(self, p, m) -> str:
+    METHODS = {"citacao": "citação", "edicao": "edição", "mencao": "menção",
+               "continuidade": "continuidade no tópico", "periodo": "atividade no mesmo período"}
+
+    def render_guess(self, g) -> str:
+        """Autor provável de uma mensagem de convidado/conta apagada."""
+        name = g["member_name"] or g["name"]
+        methods = ", ".join(self.METHODS.get(x, x) for x in (g["methods"] or "").split(",") if x)
+        others = f" · {g['candidates']} candidatos" if (g["candidates"] or 1) > 1 else ""
+        names = f" ({e(g['names'])})" if g["names"] and g["names"] != g["name"] else ""
+        return (f'<div class="guess" title="Sugestão automática, não é o autor registrado no fórum">'
+                f'provável: {member_link(name)}{names}<br><span class="conf {e(g["confidence"])}">'
+                f'confiança {e(g["confidence"])}</span> · {e(methods)}{others}</div>')
+
+    def render_post(self, p, m, guess=None) -> str:
         who = [f'<span class="name">{member_link(p["author"], m)}</span>']
         if m:
             if m["avatar_url"]:
@@ -586,6 +652,8 @@ class Pages:
             who.append('<div class="extra">' + "<br>".join(extra) + "</div>")
         elif p["kind"] == "n":
             who.append('<div class="extra">membro local</div>')
+        if guess is not None:
+            who.append(self.render_guess(guess))
         if p["kind"] == "a":
             content = clean_html(p["html"])
             date = fmt_date(p["date"], p["date_raw"])
@@ -623,7 +691,8 @@ class Pages:
     def member_page(self, h, name: str):
         m = self.f.member(name)
         posts = self.f.member_posts(name)
-        if not m and not posts:
+        ident = self.identity_box(name, m["user_id"] if m else None)
+        if not m and not posts and not ident:
             return None
         info = []
         if m:
@@ -675,9 +744,32 @@ class Pages:
         hits = "".join(self.hit(p) for p in posts) or '<div class="hit">Nenhuma mensagem arquivada.</div>'
         body = f"""<div class="box"><h2>{e(name)}</h2>
 <div style="padding:12px">{''.join(info) or 'Sem dados de perfil.'}<div style="clear:both"></div></div></div>
-{self.search.member_correlations(name) if self.search else ''}
+{ident}{self.search.member_correlations(name) if self.search else ''}
 <div class="box"><h2>Mensagens arquivadas recentes</h2>{hits}</div>"""
         return layout(name, body, [("Índice", "/"), ("Membros", "/membros"), (name, None)])
+
+    def identity_box(self, name: str, user_id) -> str:
+        idt = self.f.identity(name, user_id)
+        parts = []
+        if idt["aliases"]:
+            parts.append("<div><b>Outros nomes desta conta:</b> " + ", ".join(
+                f'{member_link(a["name"])} <span class="small">({e(a["source"])})</span>'
+                for a in idt["aliases"]) + "</div>")
+        if idt["person"] is not None:
+            names = ", ".join(
+                (member_link(n["name"]) if n["is_member"] else e(n["name"])) +
+                f' <span class="small">({e(n["certainty"])})</span>' for n in idt["names"])
+            note = f'<div class="small">{e(idt["person"]["note"])}</div>' if idt["person"]["note"] else ""
+            parts.append(f"<div><b>Mesma pessoa:</b> {names or '–'}</div>{note}")
+        if idt["guessed"]:
+            g = {r["confidence"]: r["n"] for r in idt["guessed"]}
+            txt = ", ".join(f"{g[c]} com confiança {c}" for c in ("alta", "média", "baixa") if g.get(c))
+            parts.append(f"<div><b>Mensagens de convidado atribuídas a este nome:</b> {txt}</div>")
+        if not parts:
+            return ""
+        return ('<div class="box"><h2>Identidade</h2><div style="padding:12px">' + "".join(parts) +
+                '<div class="small" style="margin-top:6px">Levantado pelo scraper a partir de citações, '
+                'edições, histórico de nick e denúncias; pode conter erros.</div></div></div>')
 
     def hit(self, p, q: str = "") -> str:
         text = (p["content_text"] or "").strip()

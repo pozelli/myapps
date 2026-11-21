@@ -20,6 +20,21 @@ Só usa a biblioteca padrão do Python (3.9+), sem dependências.
 Tópicos que o scraper só listou (sem mensagens ainda) aparecem como
 "não arquivado", com link para o original.
 
+## Versões do banco do scraper
+
+Funciona com o schema 1 (original) e com o schema 2+ (`PRAGMA user_version`),
+em que contagens viraram views e curtidas/grupos ganharam tabelas próprias.
+Para o schema novo, `gmbr_forum/compat.py` cria em cada conexão VIEWs TEMP
+com o formato antigo, e as partes caras (estatísticas por tópico, curtidas,
+grupos) ficam pré-calculadas no índice de busca.
+
+Quando o banco traz os dados de identidade (schema 3+), o fórum mostra:
+- nas mensagens de convidado/conta apagada, o **autor provável**, com a
+  confiança e o método (citação, edição, menção, continuidade, período);
+- no perfil, **outros nomes da conta** (nicks antigos) e **contas da mesma
+  pessoa** (informado pela administração ou levantado em denúncias), além de
+  quantas mensagens de convidado foram atribuídas ao nome.
+
 ## Busca avançada
 
 Três buscas em `/busca/mensagens`, `/busca/topicos` e `/busca/usuarios`, todas

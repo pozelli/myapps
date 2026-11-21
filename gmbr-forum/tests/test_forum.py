@@ -233,5 +233,131 @@ INSERT INTO poll_options VALUES (10,0,'GameMaker',3,75.0),(10,1,'Godot',1,25.0);
         self.assertEqual(html.count("Moedas"), 1)
 
 
+SCHEMA_V5 = """
+PRAGMA user_version = 5;
+CREATE TABLE forums (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, url TEXT, parent_id INTEGER,
+  topics_listed INTEGER, scraped_at TEXT, listing_next_start INTEGER);
+CREATE TABLE topics (id INTEGER PRIMARY KEY, forum_id INTEGER, title TEXT, description TEXT, url TEXT,
+  section TEXT, prefix TEXT, topic_type TEXT, replies_forum INTEGER, views_forum INTEGER,
+  last_post_id_forum INTEGER, scraped_replies INTEGER, pages INTEGER, posts_scraped INTEGER,
+  completed INTEGER, scraped_at TEXT);
+CREATE TABLE posts (id INTEGER PRIMARY KEY, topic_id INTEGER, page_start INTEGER, position INTEGER,
+  title TEXT, author_id INTEGER, author_name TEXT, author_id_inferred INTEGER, date_raw TEXT, date TEXT,
+  edit_info TEXT, edit_count INTEGER, last_edit_date TEXT, dislikes INTEGER, vote_title TEXT,
+  content_html TEXT, content_text TEXT, scraped_at TEXT, has_signature INTEGER);
+CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, color TEXT);
+CREATE TABLE members (user_id INTEGER PRIMARY KEY, name TEXT, profile_url TEXT, avatar_url TEXT,
+  group_id INTEGER, color TEXT, rank_title TEXT, rank_image TEXT, joined_raw TEXT, joined_date TEXT,
+  last_visit_raw TEXT, last_visit TEXT, reputation INTEGER, post_count_forum INTEGER, website TEXT,
+  humor TEXT, age TEXT, about_me TEXT, specialty TEXT, platforms TEXT, projects TEXT, infractions TEXT,
+  grades_received TEXT, nick_history TEXT, signature_html TEXT, sidebar_fields TEXT, sidebar_images TEXT,
+  profile_fields TEXT, in_memberlist INTEGER, profile_status TEXT, profile_scraped_at TEXT, updated_at TEXT);
+CREATE TABLE member_groups (user_id INTEGER, group_id INTEGER);
+CREATE TABLE post_likes (post_id INTEGER, liker_name TEXT, user_id INTEGER);
+CREATE TABLE polls (topic_id INTEGER PRIMARY KEY, question TEXT, closed INTEGER, scraped_at TEXT);
+CREATE TABLE poll_options (topic_id INTEGER, position INTEGER, text TEXT, votes INTEGER,
+  PRIMARY KEY (topic_id, position));
+CREATE TABLE account_aliases (name TEXT, user_id INTEGER, source TEXT, evidence INTEGER);
+CREATE TABLE persons (id INTEGER PRIMARY KEY, label TEXT, note TEXT);
+CREATE TABLE person_names (name TEXT, person_id INTEGER, certainty TEXT, note TEXT);
+CREATE TABLE post_author_guesses (post_id INTEGER, name TEXT, person_id INTEGER, user_id INTEGER,
+  user_link TEXT, method TEXT, confidence TEXT, score REAL, evidence TEXT);
+CREATE VIEW v_post_author_best AS SELECT post_id, name, name AS names, person_id, user_id, user_link,
+  score, method AS methods, confidence, 1 AS candidates FROM post_author_guesses;
+CREATE VIEW v_topic_stats AS
+  SELECT t.id AS topic_id, t.forum_id, COUNT(p.id) AS post_count, COUNT(p.id) - 1 AS reply_count,
+         COUNT(DISTINCT p.author_name) AS participants,
+         (SELECT author_id FROM posts WHERE topic_id = t.id ORDER BY position LIMIT 1) AS author_id,
+         (SELECT author_name FROM posts WHERE topic_id = t.id ORDER BY position LIMIT 1) AS author_name,
+         MIN(p.date) AS first_post_date,
+         (SELECT id FROM posts WHERE topic_id = t.id ORDER BY position DESC LIMIT 1) AS last_post_id,
+         (SELECT author_name FROM posts WHERE topic_id = t.id ORDER BY position DESC LIMIT 1) AS last_author_name,
+         MAX(p.date) AS last_post_date
+  FROM topics t LEFT JOIN posts p ON p.topic_id = t.id GROUP BY t.id;
+CREATE VIEW v_poll_options AS
+  SELECT o.topic_id, o.position, o.text, o.votes,
+         100.0 * o.votes / NULLIF((SELECT SUM(votes) FROM poll_options x WHERE x.topic_id = o.topic_id), 0) AS percent
+  FROM poll_options o;
+
+INSERT INTO forums VALUES (1,'Engines',NULL,NULL,NULL,NULL,NULL,NULL);
+INSERT INTO groups VALUES (11,'Lendas','lendas','#9E0387'),(8,'Membros',NULL,NULL);
+INSERT INTO members (user_id,name,group_id,post_count_forum,reputation,signature_html,sidebar_fields,profile_fields,joined_date)
+  VALUES (1,'Ana',11,10,5,'<i>assinatura da Ana</i>','{"Moedas": "7"}','{"Quem sou eu": "Dev"}','2010-01-01'),
+         (2,'Bia',NULL,3,1,NULL,'{}','{}','2011-01-01');
+INSERT INTO member_groups VALUES (1,11),(1,8);
+INSERT INTO topics (id,forum_id,title,prefix,topic_type,replies_forum,views_forum,completed,posts_scraped)
+  VALUES (10,1,'Motor de plataforma','[Votação]','topic_read_locked',2,50,1,3);
+INSERT INTO posts (id,topic_id,position,title,author_id,author_name,date,content_html,content_text,has_signature) VALUES
+  (100,10,0,'Motor',1,'Ana','2020-01-01T10:00:00','<p>Olá mundo</p>','Olá mundo',1),
+  (101,10,1,'Re',2,'Bia','2020-01-02T10:00:00','<blockquote><div><cite>Ana escreveu:</cite>Olá</div></blockquote>boa ideia','boa ideia',0),
+  (102,10,2,'Re',NULL,'Convidado','2020-01-03T10:00:00','<p>sou eu mesmo</p>','sou eu mesmo',0);
+INSERT INTO post_likes VALUES (100,'Bia',2);
+INSERT INTO polls VALUES (10,'Qual engine?',0,NULL);
+INSERT INTO poll_options VALUES (10,0,'GameMaker',3),(10,1,'Godot',1);
+INSERT INTO account_aliases VALUES ('AnaVelha',1,'citações',4);
+INSERT INTO persons VALUES (1,'Ana','informado pelo admin');
+INSERT INTO person_names VALUES ('Ana',1,'informado',NULL),('Fantasma',1,'denúncia',NULL);
+INSERT INTO post_author_guesses VALUES (102,'Fantasma',1,NULL,NULL,'citacao','alta',0.9,'{}');
+"""
+
+
+class SchemaV5Test(unittest.TestCase):
+    """Banco no schema 5 do scraper (contagens em views, post_likes, member_groups...)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        arch = os.path.join(self.tmp.name, "gmbr.sqlite")
+        with sqlite3.connect(arch) as c:
+            c.executescript(SCHEMA_V5)
+        local = os.path.join(self.tmp.name, "local.sqlite")
+        index = os.path.join(self.tmp.name, "search.sqlite")
+        Forum(arch, local)
+        build(arch, local, index, log=lambda *_: None)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Forum(arch, local, index)))
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.tmp.cleanup()
+
+    get = ServerTest.get
+    post = ServerTest.post
+
+    def test_pages(self):
+        html = self.get("/")[1]
+        self.assertIn("Engines", html)
+        html = self.get("/f/1")[1]
+        self.assertIn("Motor de plataforma", html)
+        self.assertIn("[Votação]", html)
+        self.assertIn("trancado", html)
+        html = self.get("/t/10")[1]
+        self.assertIn("Lendas", html)                    # grupo via group_id
+        self.assertIn("assinatura da Ana", html)          # assinatura via has_signature
+        self.assertIn("👍 1", html)                        # curtidas via post_likes
+        self.assertIn("Enquete: Qual engine?", html)
+        self.assertIn("75%", html)
+        self.assertIn("provável:", html)                  # autor provável do convidado
+        self.assertIn("/membro/Fantasma", html)
+        html = self.get("/membro/Ana")[1]
+        self.assertIn("Moedas", html)
+        self.assertIn("AnaVelha", html)                   # nick antigo
+        self.assertIn("Fantasma", html)                   # mesma pessoa
+        self.assertIn("Quem mais o citou", html)
+        html = self.get("/membro/Fantasma")[1]            # só existe pela identidade
+        self.assertIn("com confiança alta", html)
+        self.assertIn("Bia", self.get("/membros")[1])
+
+    def test_search(self):
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?curtida_por=bia")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?cita=ana")[1])
+        self.assertIn("1 tópicos", self.get("/busca/topicos?enquete=sim&trancado=sim")[1])
+        self.assertIn("1 usuários", self.get("/busca/usuarios?grupo=Lendas")[1])
+        self.post("/t/10/responder", {"nome": "Caio", "texto": "nova resposta aqui"})
+        self.assertIn("nova resposta aqui", self.get("/t/10")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?q=nova+resposta")[1])
+
+
 if __name__ == "__main__":
     unittest.main()

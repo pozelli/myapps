@@ -19,7 +19,9 @@ import sqlite3
 import time
 from html import unescape
 
-INDEX_VERSION = "3"
+from . import compat
+
+INDEX_VERSION = "4"
 
 SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -207,13 +209,22 @@ def build(archive: str, local: str, out: str, log=print) -> None:
     for f in (tmp, tmp + "-wal", tmp + "-shm", tmp + "-journal"):
         if os.path.exists(f):
             os.remove(f)
-    db = sqlite3.connect(tmp)
+    db = sqlite3.connect(f"file:{tmp}", uri=True)
     db.execute("PRAGMA journal_mode=OFF")
     db.execute("PRAGMA synchronous=OFF")
     db.execute("PRAGMA cache_size=-200000")
     db.executescript(SCHEMA)
     src = sqlite3.connect(f"file:{archive}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
+    if compat.needs_compat(src):
+        # schema 2+ do scraper: VIEWs com o formato antigo (ver compat.py),
+        # e as tabelas c_* vão também para o índice, para o servidor usar.
+        log("Banco no schema novo: preparando compatibilidade…")
+        compat.prepare(src)
+        db.execute("ATTACH DATABASE ? AS a", (f"file:{archive}?mode=ro",))
+        compat.materialize(db, "a", "main")
+        db.commit()
+        db.execute("DETACH DATABASE a")
     loc = sqlite3.connect(local) if os.path.exists(local) else None
     if loc:
         loc.row_factory = sqlite3.Row
