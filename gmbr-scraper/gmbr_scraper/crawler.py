@@ -371,6 +371,17 @@ class Crawler:
                 log.error("%s — seguindo", e)
                 continue
             poll = parser.parse_poll(parser.soup_of(html))
+            if poll and not poll["options"]:
+                # Enquete aberta em que a conta não votou: a página mostra só o
+                # formulário de voto; os resultados ficam em ?vote=viewresult.
+                try:
+                    res = parser.parse_poll(parser.soup_of(self.http.get(
+                        _page_path(row["url"] or f"/t{tid}-", "t", tid, 0)
+                        + "?vote=viewresult")))
+                    if res and res["options"]:
+                        poll = res
+                except (FileNotFoundError, RuntimeError, requests.RequestException) as e:
+                    log.warning("Resultados da enquete t%d indisponíveis: %s", tid, e)
             self.db.upsert_poll(tid, poll or {"question": None, "options": []})
             self.db.commit()
             done += 1
