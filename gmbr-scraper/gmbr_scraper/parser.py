@@ -63,7 +63,16 @@ def parse_date(text: str | None, now: datetime | None = None) -> str | None:
 # --------------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------------
+_IFRAME_CLOSE_RE = re.compile(r"</iframe\s*>", re.I)
+_IFRAME_OPEN_RE = re.compile(r"(<iframe\b[^>]*>)", re.I)
+
+
 def soup_of(html: str) -> BeautifulSoup:
+    # Posts antigos trazem <iframe> sem </iframe> (o fórum trocou <embed> por
+    # <iframe> mas manteve </embed>); o lxml então trata o resto da página
+    # como texto do iframe e some com os posts seguintes. Fecha todo iframe
+    # logo após a abertura (o conteúdo interno de iframe não é renderizado).
+    html = _IFRAME_OPEN_RE.sub(r"\1</iframe>", _IFRAME_CLOSE_RE.sub("", html))
     return BeautifulSoup(html, "lxml")
 
 

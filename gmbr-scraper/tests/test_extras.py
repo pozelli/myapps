@@ -94,3 +94,13 @@ def test_throttle_shared_and_decays(tmp_path, monkeypatch):
     for _ in range(10):
         a.hit("HTTP 429")
     assert a.factor() == crawler.Throttle.MAX_FACTOR
+
+
+def test_unclosed_iframe_does_not_swallow_following_posts():
+    post = ('<div id="p{0}" class="post row1"><div class="postbody"><div class="content">'
+            '{1}</div></div></div>')
+    html = ("<html><body>"
+            + post.format(1, '<object><iframe src="https://www.youtube.com/embed/x"></embed></object>')
+            + post.format(2, "segundo") + post.format(3, "terceiro") + "</body></html>")
+    soup = parser.soup_of(html)
+    assert [d["id"] for d in soup.select("div.post[id^=p]")] == ["p1", "p2", "p3"]
