@@ -42,7 +42,89 @@ urgente favor pfv pls please alguem algum preciso precisando sei saber resolvido
 v1 v2 1 2 3 4 5 0 x d vs criar criando cria faço faco fazendo usando usar ajudem pedido pedidos
 gente galera aqui ai aí bem bom boa
 """.split())
-QA_STOP = STOP | set("erro errado funciona funcionando consigo consegue usar uso criar código codigo".split())
+# Temas das dúvidas (Perguntas e Respostas). Termos sem acento: palavra,
+# prefixo* ou "frase". Um título pode cair em mais de um tema.
+QA_THEMES = [
+    ("Pulo, gravidade e plataforma", ["pulo", "pular", "pula", "pulando", "salto", "saltar", "gravidade", "jump*",
+                                      "vspeed", "plataforma*", "cair", "caindo", "queda"]),
+    ("Colisão", ["colis*", "colid*", "solid*", "parede*", "atravess*", "place_free", "place_meeting", "bater", "batendo"]),
+    ("Movimentação do personagem", ["moviment*", "mover", "movendo", "andar", "andando", "correr", "correndo",
+                                    "hspeed", "velocidade", '"8 direcoes"', "direcional"]),
+    ("Inimigos, IA e perseguição", ["inimig*", "seguir", "segue", "persegu*", '"inteligencia artificial"',
+                                            "patrulh*", "mp_*", "boss", "chefe"]),
+    ("Tiros, armas e projéteis", ["tiro", "tiros", "atira*", "bala", "balas", "disparo*", "disparar", "projet*",
+                                  "missil", "arma", "armas"]),
+    ("Vida, dano e morte", ["vida", "vidas", "hp", "energia", "dano", "morre*", "morrer", "morte", "health",
+                            '"barra de vida"']),
+    ("Animação e troca de sprites", ["anima*", "frame*", "subimag*", "image_index", "image_speed", '"mudar sprite"',
+                                     '"trocar sprite"', '"mudar a sprite"', '"trocar a sprite"']),
+    ("Rooms, fases e transições", ["room", "rooms", "fase", "fases", "level", "levels", "nivel", "niveis",
+                                   "transic*", "checkpoint*"]),
+    ("Salvar e carregar (save, arquivos)", ["salva*", "save", "saves", "load", "carrega*", "arquivo*", "ini", "txt",
+                                            "registro"]),
+    ("Menus, botões e HUD", ["menu*", "botao", "botoes", "button*", "hud", "interface", "pause", "pausa*",
+                             '"tela inicial"']),
+    ("Textos, diálogos e fontes", ["texto*", "dialog*", "fala", "falas", "fonte", "fontes", "font", "draw_text",
+                                   '"caixa de texto"', "legenda*", "string*"]),
+    ("Câmera, view e resolução", ["camera", "view*", '"tela cheia"', "fullscreen", "resoluc*", "zoom", "scroll*"]),
+    ("Mouse, cliques e toque", ["mouse", "clic*", "clique*", "arrastar", "cursor", "touch"]),
+    ("Sons e música", ["som", "sons", "musica*", "audio", "sound*", "mp3", "midi", "wav", "ogg"]),
+    ("Online e multiplayer", ["online", "multiplayer", "servidor*", "server", "39dll", "socket*", "lan", "mmo*"]),
+    ("Pontos, tempo e contadores", ["ponto", "pontos", "pontua*", "score*", "recorde*", "highscore*", "tempo", "timer",
+                                    "cronometro", "contador*", "alarm*", "relogio"]),
+    ("Variáveis, arrays e lógica", ["variave*", "variavel", "array*", "ds_*", "global*", "argument*", "loop",
+                                    "while", "switch"]),
+    ("Inventário, itens e loja", ["inventar*", "item", "itens", "loja", "shop", "equipar", "moeda*", "dinheiro"]),
+    ("Jogos 3D", ["3d", "d3d*", '"primeira pessoa"', "fps"]),
+    ("Exportar, compilar e celular", ["export*", "compil*", "exe", "executavel", "android", "apk", "mobile",
+                                      "celular*", "html5", "ios"]),
+    ("Erros e travamentos", ["erro", "erros", "error*", "bug", "bugs", "bugado", "trava*", "crash*", "unexpected",
+                             '"nao abre"', '"fecha sozinho"']),
+    ("Partículas, efeitos e shaders", ["particul*", "efeito*", "explos*", "shader*", "surface*", "brilho",
+                                       "sombra*", "luz", "iluminac*"]),
+    ("Aleatoriedade e geração de objetos", ["aleator*", "random*", "irandom*", "choose", "spawn*", "gerar", "gerando"]),
+    ("Física", ["fisica", "physics", "box2d", "empurr*", "quicar", "ricoche*", '"plataforma movel"']),
+    ("RPG, NPCs e batalhas", ["rpg", "turno*", "batalha*", "npc*", "quest*", "missao", "missoes"]),
+    ("Teclado, controles e joystick", ["tecla*", "teclado", "keyboard*", "joystick*", "controle*", "gamepad"]),
+    ("Ângulo, direção e rotação", ["angul*", "direc*", "rotac*", "girar", "gira", "image_angle", "point_direction"]),
+    ("Instâncias (criar, destruir, identificar)", ["instanc*", "instance_*", "destrui*", "destroy", '"criar objeto"',
+                                                   "parent", '"objeto pai"']),
+    ("Desenho na tela (draw)", ["draw*", "alpha", "transparen*", "cor", "cores", "blend*"]),
+    ("Arte: sprites, tiles e programas de desenho", ["desenh*", "pixel*", "tileset*", "tiles", "background*",
+                                                     "photoshop", "gimp", "paint", '"fazer sprite"',
+                                                     '"criar sprite"', '"fazer sprites"']),
+]
+
+
+def theme_regex(terms: list[str]) -> re.Pattern:
+    parts = []
+    for t in terms:
+        t = t.strip('"')
+        if t.endswith("*"):
+            parts.append(r"\b" + re.escape(t[:-1]) + r"\w*")
+        else:
+            parts.append(r"\b" + re.escape(t) + r"\b")
+    return re.compile("|".join(parts))
+
+
+# expressões que contêm um termo do tema mas não são do tema
+QA_EXCLUDE = {
+    "Erros e travamentos": ['"7 erros"', '"jogo dos erros"', '"sete erros"'],
+    "Tiros, armas e projéteis": ['"nome para"'],
+}
+THEME_RX = [(label, terms, theme_regex(terms),
+             theme_regex(QA_EXCLUDE[label]) if label in QA_EXCLUDE else None) for label, terms in QA_THEMES]
+_QUESTION = re.compile(r"\bcomo\b|\?|resolvid|\bduvida|\bajuda|\bproblema|\bnao (consigo|funciona)")
+
+# Assuntos: expressões de 2 palavras (ou "X de Y") nos títulos
+LINK_WORDS = set("de do da dos das com no na em pra para por".split())
+SUBJECT_STOP = set("removido remocao conta topico duvida resolvido parte aula ajuda tutorial versao".split())
+GML_VARS = set("""image_angle image_index image_speed image_xscale image_yscale image_alpha image_blend
+keyboard_string sprite_index mask_index view_xview view_yview room_speed room_width room_height""".split())
+
+
+class Html(str):
+    """Detalhe que já é HTML (não é escapado de novo)."""
 
 TOOLS = [
     ("GameMaker 8 / 8.1", '"game maker 8" OR gm8 OR "gm 8" OR "gm8.1" OR "game maker 8.1"'),
@@ -131,10 +213,14 @@ class Rankings:
               "no título (A +15, B +10, C +5, D +2) + 20 se está no Hall of Fame/Museu + 5 se é projeto completo.",
               self.r_games, unit="pontos"),
             R("assuntos", "Conteúdo", "Assuntos mais falados",
-              "Palavras e pares de palavras mais frequentes nos títulos dos tópicos (sem palavras genéricas).",
+              "Expressões de duas palavras (ou “X de Y”) nos títulos dos tópicos, ordenadas pelo número de "
+              "tópicos. Só entram expressões que aparecem juntas bem mais do que o acaso explicaria e que "
+              "foram usadas por 5+ autores; nomes de funções do GML ficam de fora.",
               self.r_subjects, unit="tópicos"),
             R("duvidas", "Conteúdo", "Dúvidas mais comuns",
-              "Temas mais frequentes nos títulos de Perguntas e Respostas, com a dúvida mais vista de cada um.",
+              "Títulos de Perguntas e Respostas agrupados em 30 temas de desenvolvimento por palavras-chave "
+              "(mostradas em cada linha; um título pode cair em mais de um tema). Cerca de 40% dos títulos "
+              "são vagos (“Dúvida”, “Ajuda!”) e não entram. Os exemplos são as dúvidas mais vistas do tema.",
               self.r_questions, unit="tópicos"),
             R("funcoes", "Conteúdo", "Funções do GML mais discutidas",
               "Mensagens que usam a função no texto ou no código (ex.: instance_create(...)).",
@@ -495,68 +581,83 @@ class Rankings:
             out.append(((t["title"] or ""), topic_href(t["ref"]), round(pts), " · ".join(bits)))
         return out
 
-    def _terms(self, titles: list[tuple], stop: set) -> list[tuple[str, int, tuple]]:
-        """Conta, por tópico, palavras e pares de palavras dos títulos.
-        titles: [(título, ref, visitas)]. Devolve [(termo, nº de tópicos, exemplo)]."""
-        uni, bi = Counter(), Counter()
-        disp: dict = {}
+    def r_subjects(self, ctx):
+        """Expressões de duas palavras (ou "X de Y") que aparecem juntas mais do que o
+        acaso explicaria (PMI > 1,5), usadas por pelo menos 5 autores; ordenadas pelo
+        número de tópicos. Pares que cobrem quase os mesmos tópicos de um par melhor
+        colocado ("mario bros" x "super mario") são descartados."""
+        dw, args = self.dwhere("created", ctx)
+        rows = self.q(f"SELECT title, ref, views, author_per FROM s.tm WHERE forum_id <> 24 {dw}", *args)
+        fns = {r[0] for r in self.q("SELECT fn FROM s.fn_mentions GROUP BY fn HAVING COUNT(*) >= 3")} | GML_VARS
+        n_titles = len(rows) or 1
+        uni: Counter = Counter()
+        refs: dict = defaultdict(set)
+        authors: dict = defaultdict(set)
+        disp: dict = defaultdict(Counter)
         best: dict = {}
-        tokenized = []
-        vocab = set()
-        for title, ref, views in titles:
-            words = re.findall(r"[0-9a-zà-ÿ]+(?:[_+#][0-9a-zà-ÿ]+)*", (title or "").lower())
-            tokenized.append((title, ref, views, words))
-            vocab.update(fold(w) for w in words)
-
-        def sing(f: str) -> str:  # "sprites" conta como "sprite"
-            if len(f) > 4 and f.endswith("s") and f[:-1] in vocab:
-                return f[:-1]
-            if len(f) > 5 and f.endswith("es") and f[:-2] in vocab:
-                return f[:-2]
-            return f
-        for title, ref, views, words in tokenized:
-            folded = [sing(fold(w)) for w in words]
-            seen = set()
-            for w, f in zip(words, folded):
-                if len(f) < 3 or f in stop or f.isdigit():
-                    continue
-                seen.add(f)
-                disp.setdefault(f, Counter())[w] += 1
-            pairs = set()
-            for i in range(len(folded) - 1):
-                a, b = folded[i], folded[i + 1]
-                if a in stop or b in stop or len(a) < 3 or len(b) < 3 or a.isdigit() or b.isdigit():
-                    continue
-                pairs.add(f"{a} {b}")
-                disp.setdefault(f"{a} {b}", Counter())[f"{words[i]} {words[i + 1]}"] += 1
-            for term in seen | pairs:
-                (bi if " " in term else uni)[term] += 1
-                if term not in best or (views or 0) > best[term][2]:
-                    best[term] = (title, ref, views or 0)
-        cands = [(t, n) for t, n in uni.items()] + [(t, n) for t, n in bi.items() if n >= 3]
-        cands.sort(key=lambda x: -x[1])
-        out = []
-        for term, n in cands:
-            if " " not in term and any(term in b.split() and bi[b] >= 0.6 * n for b in bi):
-                continue  # palavra que quase sempre aparece no mesmo par: fica o par
-            out.append((disp[term].most_common(1)[0][0], n, best[term]))
-            if len(out) == TOP:
+        bad = lambda x: x in STOP or x in SUBJECT_STOP or len(x) < 3 or x.isdigit()
+        for title, ref, views, author in rows:
+            raw = re.findall(r"[0-9a-zà-ÿ]+", (title or "").lower())
+            w = [fold(x) for x in raw]
+            uni.update(set(w))
+            for i in range(len(w) - 1):
+                spans = []
+                if not bad(w[i]) and not bad(w[i + 1]):
+                    spans.append((i, i + 2))
+                if i + 2 < len(w) and w[i + 1] in LINK_WORDS and not bad(w[i]) and not bad(w[i + 2]):
+                    spans.append((i, i + 3))
+                for a, b in spans:
+                    key = " ".join(w[a:b])
+                    refs[key].add(ref)
+                    authors[key].add(author)
+                    disp[key][" ".join(raw[a:b])] += 1
+                    if key not in best or (views or 0) > best[key][2]:
+                        best[key] = (title, ref, views or 0)
+        cands = []
+        for key, rs in refs.items():
+            n = len(rs)
+            ws = key.split()
+            if n < 5 or len(authors[key]) < 5 or f"{ws[0]}_{ws[-1]}" in fns:
+                continue
+            if math.log(n * n_titles / (uni[ws[0]] * uni[ws[-1]])) <= 1.5:
+                continue
+            cands.append((n, key))
+        cands.sort(key=lambda x: (-x[0], x[1]))
+        chosen: list = []
+        for n, key in cands:
+            if any(len(refs[key] & refs[k]) >= 0.5 * n for _, k in chosen):
+                continue
+            chosen.append((n, key))
+            if len(chosen) == TOP:
                 break
+        out = []
+        for n, key in chosen:
+            label = disp[key].most_common(1)[0][0]
+            ex = best[key]
+            out.append((label, self.tsearch(ctx, q=f'"{label}"', onde="titulo"), n,
+                        Html(f'{len(authors[key])} autores · ex.: <a href="{e(topic_href(ex[1]))}">{e(ex[0])}</a>')))
         return out
 
-    def r_subjects(self, ctx):
-        dw, args = self.dwhere("created", ctx)
-        titles = self.q(f"SELECT title, ref, views FROM s.tm WHERE forum_id <> 24 {dw}", *args)
-        return [(term, self.tsearch(ctx, q=term, onde="titulo"), n, f'ex.: “{ex[0]}”')
-                for term, n, ex in self._terms(titles, STOP)]
-
     def r_questions(self, ctx):
+        """Temas de dúvida (lista QA_THEMES) contados nos títulos de Perguntas e Respostas."""
         dw, args = self.dwhere("created", ctx)
-        titles = self.q(f"SELECT title, ref, views FROM s.tm WHERE forum_id = {QA_FORUM} {dw}", *args)
+        rows = self.q(f"SELECT title, ref, views FROM s.tm WHERE forum_id = {QA_FORUM} {dw}", *args)
+        folded = [(fold(t or ""), t, r, v or 0) for t, r, v in rows]
+        res = []
+        for label, terms, rx, ex_rx in THEME_RX:
+            hits = [x for x in folded if rx.search(x[0]) and not (ex_rx and ex_rx.search(x[0]))]
+            if hits:
+                # exemplos: dúvidas de verdade ("como…", "?", "[Resolvido]") primeiro, depois as mais vistas
+                hits.sort(key=lambda x: (not _QUESTION.search(x[0]), -x[3]))
+                res.append((len(hits), label, terms, hits[:2]))
+        res.sort(key=lambda x: -x[0])
         out = []
-        for term, n, ex in self._terms(titles, QA_STOP):
-            out.append((term, self.tsearch(ctx, q=term, onde="titulo", forum=QA_FORUM), n,
-                        f'mais vista: <a href="{e(topic_href(ex[1]))}">{e(ex[0])}</a>'))
+        for n, label, terms, ex in res[:TOP]:
+            q = " ".join(terms)
+            examples = " · ".join(f'<a href="{e(topic_href(h[2]))}">{e(h[1])}</a>' for h in ex)
+            words = ", ".join(t.strip('"') for t in terms[:6]) + ("…" if len(terms) > 6 else "")
+            out.append((label, self.tsearch(ctx, q=q, modo="qualquer", onde="titulo", forum=QA_FORUM), n,
+                        Html(f'{examples}<div class="rk-kw">termos: {e(words)}</div>')))
         return out
 
     def r_functions(self, ctx):
@@ -732,7 +833,7 @@ class Rankings:
                        if isinstance(value, (int, float)) and value > 0 else "")
                 val = f"{value:,}".replace(",", ".") if isinstance(value, int) else (
                     f"{value:.1f}".replace(".", ",") if isinstance(value, float) else e(value))
-                det = detail if detail.startswith("mais vista:") else e(detail)
+                det = detail if isinstance(detail, Html) else e(detail)
                 lis.append(f"""<li><span class="rk-n">{i}</span><div class="rk-main"><a href="{e(link)}">{e(label)}</a>
 <div class="small">{det}</div><div class="rk-bar">{bar}</div></div><span class="rk-v">{val}</span></li>""")
             content = f'<ol class="rk">{"".join(lis)}</ol>'
@@ -761,4 +862,5 @@ ol.rk li:nth-child(1) .rk-n{color:#c99700}ol.rk li:nth-child(2) .rk-n{color:#8a9
 .rk-bar{height:4px;margin-top:3px}.rk-bar i{display:block;height:100%;background:var(--head2);opacity:.55;border-radius:2px}
 .rk-v{flex:none;font-weight:700;font-variant-numeric:tabular-nums}
 .err{color:#b3261e;padding:10px 12px}
+.rk-kw{font-size:11px;opacity:.8}
 </style>"""
