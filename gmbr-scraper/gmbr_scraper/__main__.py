@@ -262,6 +262,12 @@ def cmd_identity(args):
     if args.load:
         n = identity.load_claims(db.conn, identity.claims_from_files(args.load), args.source)
         print(f"{n} alegações carregadas ({args.source})")
+    if args.admin:
+        identity.add_admin_claim(db.conn, args.admin, args.note or "Informado pelo administrador")
+        print(f"alegação do administrador: {', '.join(args.admin)}")
+    if args.renames:
+        print(f"{identity.detect_renames(db.conn)} nicks antigos registrados")
+    print("pares:", dict(identity.save_pairs(db.conn)))
     gs = identity.groups(db.conn)
     done = identity.apply_groups(db.conn, gs)
     print(f"{len(done)} grupos aplicados a pessoas")
@@ -371,6 +377,11 @@ def main(argv=None):
     ic.add_argument("--load", nargs="*", help="arquivos JSON de alegações a carregar")
     ic.add_argument("--source", default="leitura assistida",
                     help="rótulo da origem das alegações carregadas")
+    ic.add_argument("--admin", nargs="+", metavar="NOME",
+                    help="registra que o administrador informou: estes nomes são a mesma pessoa")
+    ic.add_argument("--note", help="observação da alegação do administrador")
+    ic.add_argument("--renames", action="store_true",
+                    help="detecta nicks antigos pelas citações (account_aliases)")
     ic.set_defaults(func=cmd_identity)
 
     ga = sub.add_parser("guess-authors",

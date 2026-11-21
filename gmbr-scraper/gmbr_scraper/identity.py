@@ -29,7 +29,7 @@ NOT_ACCOUNT_NAMES = {
     "Kaique",       # conta 15 (2008) é outra pessoa; refere-se ao grupo kaique*
     "Evandro", "Die", "Bomber", "Terra", "Hiroshi", "raul", "Removed",
 }
-STRONG_KINDS = ("confirma_staff",)
+STRONG_KINDS = ("confirma_staff", "confirma_admin")
 
 
 def _clean_name(name: str) -> str:
@@ -98,10 +98,12 @@ def load_claims(conn: sqlite3.Connection, claims: list[dict], source: str) -> in
 
 def pair_status(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
     """Situação final de cada par de nomes citado junto numa alegação."""
+    # alegações do administrador (sem mensagem) contam como as mais recentes
     rows = conn.execute(
-        """SELECT c.id, c.kind, c.evidence, p.date, p.topic_id, c.post_id
-           FROM identity_claims c JOIN posts p ON p.id = c.post_id
-           ORDER BY p.date, c.id""").fetchall()
+        """SELECT c.id, c.kind, c.evidence, COALESCE(p.date, '9999-12-31') AS d,
+                  p.topic_id, c.post_id
+           FROM identity_claims c LEFT JOIN posts p ON p.id = c.post_id
+           ORDER BY d, c.id""").fetchall()
     names = defaultdict(list)
     for cid, n in conn.execute("SELECT claim_id, name FROM identity_claim_names"):
         names[cid].append(n)
@@ -111,11 +113,102 @@ def pair_status(conn: sqlite3.Connection) -> dict[tuple[str, str], dict]:
         for a, b in itertools.combinations(sorted(names[cid]), 2):
             st = status.setdefault((a, b), {"linked": False, "history": []})
             st["history"].append((date, kind, post_id))
+            if st.get("admin"):
+                continue  # o que o administrador informou prevalece
+            if kind == "confirma_admin":
+                st["admin"] = True
             if kind == "nega":
                 st["linked"] = False
             elif strong:
                 st["linked"] = True
     return status
+
+
+def save_pairs(conn: sqlite3.Connection) -> Counter:
+    """Grava identity_pairs: confirmado (agrupa), suspeita (indícios sem
+    vínculo firme, inclusive confirmações desfeitas por negação posterior) ou
+    negado (só negações)."""
+    conn.execute("DELETE FROM identity_pairs")
+    out = Counter()
+    for (a, b), st in pair_status(conn).items():
+        kinds = {h[1] for h in st["history"]}
+        if st["linked"]:
+            status = "confirmado"
+        elif kinds - {"nega"}:
+            status = "suspeita"
+        else:
+            status = "negado"
+        out[status] += 1
+        conn.execute("INSERT INTO identity_pairs VALUES (?,?,?,?,?)",
+                     (a, b, status, len(st["history"]), st["history"][-1][2]))
+    conn.commit()
+    return out
+
+
+def add_admin_claim(conn: sqlite3.Connection, names: list[str], note: str) -> None:
+    """Registra o que o administrador do fórum informou (prevalece sobre as
+    alegações das mensagens)."""
+    cur = conn.execute(
+        "INSERT INTO identity_claims (post_id, kind, evidence, excerpt, source) "
+        "VALUES (NULL, 'confirma_admin', 'administrador', ?, 'administrador')", (note,))
+    conn.executemany("INSERT OR IGNORE INTO identity_claim_names VALUES (?,?)",
+                     [(cur.lastrowid, n) for n in names])
+    conn.commit()
+
+
+def detect_renames(conn: sqlite3.Connection, min_quotes: int = 3,
+                   min_share: float = 0.8) -> int:
+    """Nicks antigos por citação: "X escreveu:" cujo texto está numa mensagem
+    anterior do mesmo tópico hoje assinada pela conta Y (o fórum guarda na
+    citação o nome da época). Também importa members.nick_history."""
+    from bs4 import BeautifulSoup
+
+    def norm(t):
+        return " ".join(re.findall(r"\w+", (t or "").lower()))
+
+    topic_posts: dict[int, list] = defaultdict(list)
+    for tid, pos, a, aid, t in conn.execute(
+            "SELECT topic_id, position, author_name, author_id, content_text FROM posts"):
+        topic_posts[tid].append((pos, a, aid, norm(t)))
+    match: dict[str, Counter] = defaultdict(Counter)
+    for tid, pos, html in conn.execute(
+            "SELECT topic_id, position, content_html FROM posts "
+            "WHERE content_html LIKE '%escreveu:</cite>%'"):
+        for bq in BeautifulSoup(html, "lxml").find_all("blockquote"):
+            cite = bq.find("cite")
+            m = cite and re.match(r"(.+?)\s+escreveu:\s*$", cite.get_text(" ").strip(), re.S)
+            if not m:
+                continue
+            name = m.group(1).strip()
+            clone = BeautifulSoup(str(bq), "lxml").find("blockquote")
+            clone.find("cite").extract()
+            for inner in clone.find_all("blockquote"):
+                inner.extract()
+            qt = norm(clone.get_text(" "))[:60]
+            if len(qt) < 20:
+                continue
+            authors = {(a, aid) for p, a, aid, t in topic_posts[tid] if p < pos and qt in t}
+            if len(authors) == 1:
+                a, aid = authors.pop()
+                match[name][aid if a != name else 0] += 1
+    conn.execute("DELETE FROM account_aliases WHERE source IN ('citações', 'nick_history')")
+    n = 0
+    for name, cnt in match.items():
+        aid, k = cnt.most_common(1)[0]
+        if aid and k >= min_quotes and k >= min_share * sum(cnt.values()):
+            conn.execute("INSERT OR REPLACE INTO account_aliases VALUES (?,?,?,?)",
+                         (name, aid, "citações", k))
+            n += 1
+    for uid, name, hist in conn.execute(
+            "SELECT user_id, name, nick_history FROM members WHERE nick_history IS NOT NULL"
+            ).fetchall():
+        for old in (x.strip() for x in hist.split("->")):
+            if old and old != name:
+                conn.execute("INSERT OR IGNORE INTO account_aliases VALUES (?,?,?,NULL)",
+                             (old, uid, "nick_history"))
+                n += 1
+    conn.commit()
+    return n
 
 
 def groups(conn: sqlite3.Connection) -> list[set[str]]:
@@ -144,22 +237,28 @@ def apply_groups(conn: sqlite3.Connection, groups_: list[set[str]],
     from .storage import Storage  # noqa: F401  (só para o tipo do conn)
     post_count = dict(conn.execute(
         "SELECT author_name, COUNT(*) FROM posts WHERE author_id IS NOT NULL GROUP BY 1"))
+    admin_names = {n for (n,) in conn.execute(
+        """SELECT n.name FROM identity_claim_names n JOIN identity_claims c
+           ON c.id = n.claim_id WHERE c.kind = 'confirma_admin'""")}
     mentions = dict(conn.execute(
         "SELECT name, COUNT(*) FROM identity_claim_names GROUP BY name"))
     joined = {}
     for n, j in conn.execute("SELECT name, joined_date FROM members"):
         if j and (n not in joined or j < joined[n]):
             joined[n] = j
-    first_claim = dict(conn.execute(
-        """SELECT n.name, MIN(p.date) FROM identity_claim_names n
+    last_claim = dict(conn.execute(
+        """SELECT n.name, MAX(p.date) FROM identity_claim_names n
            JOIN identity_claims c ON c.id = n.claim_id JOIN posts p ON p.id = c.post_id
            GROUP BY n.name"""))
 
     def usable(name: str) -> bool:
+        if name in admin_names:
+            return True
         if name in NOT_ACCOUNT_NAMES:
             return False
-        # conta com esse nome criada depois da alegação: é outra pessoa
-        j, d = joined.get(name), first_claim.get(name)
+        # conta com esse nome criada depois de TODAS as alegações sobre ele: é
+        # outra pessoa (quem voltou com o mesmo nome tem alegação posterior)
+        j, d = joined.get(name), last_claim.get(name)
         return not (j and d and j > d[:10])
 
     done = []
@@ -188,7 +287,10 @@ def apply_groups(conn: sqlite3.Connection, groups_: list[set[str]],
             pid = conn.execute("SELECT id FROM persons WHERE label=?", (label,)).fetchone()[0]
         for n in g:
             conn.execute("INSERT OR IGNORE INTO person_names (name, person_id, certainty) "
-                         "VALUES (?,?,?)", (n, pid, certainty))
+                         "VALUES (?,?,?)", (n, pid, "informado" if n in admin_names
+                                            else certainty))
+            if n in admin_names:
+                conn.execute("UPDATE person_names SET certainty='informado' WHERE name=?", (n,))
         label = conn.execute("SELECT label FROM persons WHERE id=?", (pid,)).fetchone()[0]
         done.append((label, sorted(g)))
     conn.commit()

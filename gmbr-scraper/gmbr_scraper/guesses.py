@@ -119,7 +119,7 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         by_name[name].append((uid, joined))
 
     # Nomes da mesma pessoa (persons) contam como um só nas comparações; os
-    # nicks antigos de uma conta (members.nick_history) também.
+    # nicks antigos de uma conta (nick_history, account_aliases) também.
     person_of = dict(conn.execute("SELECT name, person_id FROM person_names"))
     account_of: dict[str, set] = defaultdict(set)
     for uid, name, hist in conn.execute(
@@ -127,6 +127,10 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         for n in [x.strip() for x in hist.split("->")] + [name]:
             if n:
                 account_of[n].add(uid)
+    for n, uid in conn.execute("SELECT name, user_id FROM account_aliases"):
+        account_of[n].add(uid)
+        for (cur,) in conn.execute("SELECT name FROM members WHERE user_id=?", (uid,)):
+            account_of[cur].add(uid)
 
     def pk(name: str):
         if name in person_of:

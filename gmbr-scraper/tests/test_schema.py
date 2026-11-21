@@ -319,3 +319,38 @@ def test_identity_claims_group_persons(tmp_path):
     assert [tuple(r) for r in db.conn.execute(
         "SELECT name, certainty FROM person_names ORDER BY name")] == \
         [("Mau", "denúncia"), ("Mau_2", "denúncia")]
+
+
+def test_admin_claim_pairs_and_renames(tmp_path):
+    from gmbr_scraper import identity
+    db = Storage(str(tmp_path / "t.sqlite"))
+    db.upsert_topic_listing({"id": 5, "forum_id": 1, "replies": 3})
+    db.upsert_member({"user_id": 1, "name": "TR"})
+    db.upsert_member({"user_id": 2, "name": "tata"})
+    db.upsert_member({"user_id": 3, "name": "NovoNome"})
+    posts = [(1, "Staff", None, "x", "", "2012-01-01"), (2, "Staff", None, "x", "", "2012-01-02")]
+    texto = "uma mensagem longa o bastante para ser citada"
+    posts += [(10 + i, "NovoNome", 3, f"{texto} {i}", "", "2012-02-01") for i in range(3)]
+    posts += [(20 + i, "Outro", None, "r",
+               f"<blockquote><cite>NomeVelho escreveu:</cite>{texto} {i}</blockquote>ok",
+               "2012-02-02") for i in range(3)]
+    for k, (pid, author, uid, text, html, date) in enumerate(posts):
+        db.upsert_post({"id": pid, "topic_id": 5, "author_name": author, "author_id": uid,
+                        "content_text": text, "content_html": html,
+                        "date": date + "T10:00:00"}, 0, k)
+    db.commit()
+    identity.load_claims(db.conn, [
+        {"post_id": 1, "tipo": "confirma_staff", "nomes": ["TR", "tata"], "trecho": "mesmo IP"},
+        {"post_id": 2, "tipo": "nega", "nomes": ["TR", "tata"], "trecho": "é minha irmã"},
+    ], "teste")
+    assert dict(identity.save_pairs(db.conn)) == {"suspeita": 1}  # desfeito vira suspeita
+    assert identity.groups(db.conn) == []
+    identity.add_admin_claim(db.conn, ["TR", "tata"], "não tem irmã")
+    assert dict(identity.save_pairs(db.conn)) == {"confirmado": 1}
+    identity.apply_groups(db.conn, identity.groups(db.conn))
+    assert [tuple(r) for r in db.conn.execute(
+        "SELECT name, certainty FROM person_names ORDER BY name")] == \
+        [("TR", "informado"), ("tata", "informado")]
+    identity.detect_renames(db.conn)
+    assert [tuple(r) for r in db.conn.execute("SELECT * FROM account_aliases")] == \
+        [("NomeVelho", 3, "citações", 3)]

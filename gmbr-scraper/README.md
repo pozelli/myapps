@@ -124,7 +124,17 @@ Tabelas:
   confirmação da equipe ou afirmação nos tópicos de denúncias; vale a alegação
   mais recente de cada par (negação posterior desfaz, confirmação posterior
   refaz). Apelidos que coincidem com contas de outras pessoas e contas criadas
-  depois da alegação não entram (`identity.NOT_ACCOUNT_NAMES`).
+  depois de todas as alegações sobre o nome não entram
+  (`identity.NOT_ACCOUNT_NAMES`). `identity_pairs` guarda a situação de cada
+  par: `confirmado`, `suspeita` (indícios, inclusive confirmações desfeitas por
+  negação posterior) ou `negado`. O administrador pode informar vínculos que
+  prevalecem sobre as mensagens:
+  `identity-groups --admin TRFN tatah --note "..."` (certeza `informado`).
+- **account_aliases** — nicks antigos de uma mesma conta: do histórico do perfil,
+  de citações "X escreveu:" cujo texto está numa mensagem hoje assinada pela
+  conta (`identity-groups --renames`; exige 3+ citações e 80% de concordância)
+  e de leitura das mensagens. Usados para não tratar como "outro" quem edita a
+  própria mensagem com o nick antigo.
 - **post_author_guesses** — autores prováveis das mensagens de contas apagadas
   (exibidas como "Convidado"/"Convidad"), uma linha por (mensagem, nome,
   método), com evidência em JSON. Não altera `posts.author_id`. Recalcule com

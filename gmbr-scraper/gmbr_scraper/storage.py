@@ -169,11 +169,35 @@ CREATE TABLE IF NOT EXISTS person_names (
 CREATE TABLE IF NOT EXISTS identity_claims (
     id       INTEGER PRIMARY KEY,
     post_id  INTEGER REFERENCES posts(id) DEFERRABLE INITIALLY DEFERRED,
-    kind     TEXT,     -- confirma_staff, afirma, suspeita, nega
+                       -- NULL quando informado fora do fórum (source = administrador)
+    kind     TEXT,     -- confirma_admin, confirma_staff, afirma, suspeita, nega
     evidence TEXT,     -- IP, admissão, comportamento, outro
     excerpt  TEXT,
     source   TEXT      -- como foi extraída (ex.: leitura assistida)
 );
+
+-- Situação de cada par de nomes citado nas alegações (derivada; recalculada
+-- por identity-groups): confirmado, suspeita (inclui confirmações desfeitas
+-- por negação posterior), negado.
+CREATE TABLE IF NOT EXISTS identity_pairs (
+    name_a       TEXT,
+    name_b       TEXT,
+    status       TEXT,
+    claims       INTEGER,
+    last_post_id INTEGER,
+    PRIMARY KEY (name_a, name_b)
+) WITHOUT ROWID;
+
+-- Nicks antigos de uma mesma conta (trocas de nick). Fontes: o histórico do
+-- perfil (nick_history), citações "X escreveu:" cujo texto está numa mensagem
+-- hoje assinada pela conta, e leitura das mensagens.
+CREATE TABLE IF NOT EXISTS account_aliases (
+    name     TEXT,
+    user_id  INTEGER REFERENCES members(user_id) DEFERRABLE INITIALLY DEFERRED,
+    source   TEXT,     -- nick_history, citações, leitura assistida
+    evidence INTEGER,  -- nº de citações que batem (para source = citações)
+    PRIMARY KEY (name, user_id)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS identity_claim_names (
     claim_id INTEGER REFERENCES identity_claims(id) ON DELETE CASCADE
@@ -232,6 +256,7 @@ CREATE INDEX IF NOT EXISTS idx_guesses_person   ON post_author_guesses(person_id
 CREATE INDEX IF NOT EXISTS idx_person_names_p   ON person_names(person_id);
 CREATE INDEX IF NOT EXISTS idx_claim_names_name ON identity_claim_names(name);
 CREATE INDEX IF NOT EXISTS idx_claims_post      ON identity_claims(post_id);
+CREATE INDEX IF NOT EXISTS idx_aliases_user     ON account_aliases(user_id);
 """
 
 # Views recriadas a cada abertura (DROP + CREATE), então mudanças aqui valem
