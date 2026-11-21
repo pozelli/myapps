@@ -10,6 +10,8 @@ from urllib.parse import urlencode
 
 from gmbr_forum.app import Forum, make_handler
 from gmbr_forum.sanitize import clean_html
+from gmbr_forum.search import fts_query
+from gmbr_forum.search_index import build, split_quotes
 
 SCHEMA = """
 CREATE TABLE forums (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, url TEXT, parent_id INTEGER,
@@ -35,7 +37,8 @@ INSERT INTO topics (id,forum_id,title,author_name,replies,views,last_post_author
          (11,1,'Ainda não raspado','Bia',5,9,'Ana','2019-01-01T10:00:00',0,0);
 INSERT INTO posts (id,topic_id,position,title,author_name,date,content_html,content_text) VALUES
   (100,10,0,'Motor','Ana','2020-01-01T10:00:00','<p onclick="x()">Olá <script>alert(1)</script><a href="https://gmbr.forumeiros.com/t11-ainda">link</a></p>','Olá link'),
-  (101,10,1,'Re','Bia','2020-01-02T10:00:00','<b>resposta</b>','resposta');
+  (101,10,1,'Re','Bia','2020-01-02T10:00:00','<blockquote><div><cite>Ana escreveu:</cite>Olá colisão</div></blockquote><b>resposta</b> sobre plataforma','resposta');
+UPDATE posts SET likes=1, liked_by='["Bia"]' WHERE id=100;
 INSERT INTO members (name,group_class,post_count,extra_fields) VALUES ('Ana','group-14',10,'{"Moedas":"5"}'),('Bia',NULL,3,'{}');
 """
 
@@ -64,22 +67,24 @@ class SanitizeTest(unittest.TestCase):
 
 
 class ServerTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
-        arch = os.path.join(cls.tmp.name, "gmbr.sqlite")
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        arch = os.path.join(self.tmp.name, "gmbr.sqlite")
         with sqlite3.connect(arch) as c:
             c.executescript(SCHEMA)
-        forum = Forum(arch, os.path.join(cls.tmp.name, "local.sqlite"))
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(forum))
-        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
-        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+        local = os.path.join(self.tmp.name, "local.sqlite")
+        index = os.path.join(self.tmp.name, "search.sqlite")
+        Forum(arch, local)
+        build(arch, local, index, log=lambda *_: None)
+        forum = Forum(arch, local, index)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(forum))
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
-        cls.tmp.cleanup()
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.tmp.cleanup()
 
     def get(self, path):
         try:
@@ -113,7 +118,7 @@ class ServerTest(unittest.TestCase):
         html = self.get("/membros?q=an")[1]
         self.assertIn("/membro/Ana", html)
         self.assertNotIn("/membro/Bia", html)
-        self.assertIn("resposta", self.get("/busca?q=resposta")[1])
+        self.assertIn("resposta", self.get("/busca?q=resposta")[1])  # redireciona
         self.assertEqual(self.get("/t/999")[0], 404)
         self.assertEqual(self.get("/membro/Ninguem")[0], 404)
 
@@ -127,12 +132,69 @@ class ServerTest(unittest.TestCase):
         self.assertIn("Motor de plataforma", self.get("/recentes")[1])
         self.assertIn("&lt;i&gt;Oi&lt;/i&gt;", self.get("/f/1")[1])
 
+    def test_search_messages(self):
+        html = self.get("/busca/mensagens?q=resposta")[1]
+        self.assertIn("1 mensagens encontradas", html)
+        self.assertIn("<mark>resposta</mark>", html)
+        # texto citado só entra se pedido
+        # "colisão" só aparece no texto citado: fica de fora, a menos que seja pedido
+        self.assertIn("0 mensagens", self.get("/busca/mensagens?q=colisao")[1])
+        self.assertIn("0 mensagens", self.get("/busca/mensagens?q=colisao&campo=texto")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?q=colisao&campo=texto&incluir_citado=1")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?cita=ana")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?curtida_por=Bia")[1])
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?autor=bia&com_participante=ana")[1])
+        self.assertIn("2 mensagens", self.get("/busca/mensagens?forum=1&data_de=2020-01-01&data_ate=2020-01-02")[1])
+        self.assertIn("1 tópicos encontrados", self.get("/busca/mensagens?forum=1&agrupar=1&q=ola+OR+resposta")[1])
+        self.assertIn("pelo menos um termo", self.get("/busca/mensagens?q=-x")[1])
+        self.assertEqual(self.get('/busca/mensagens?q=%22%22%22(&ordem=x&p=abc')[0], 200)
+
+    def test_search_topics_and_users(self):
+        self.assertIn("1 tópicos", self.get("/busca/topicos?q=plataforma")[1])
+        self.assertIn("1 tópicos", self.get("/busca/topicos?participantes=ana,bia")[1])
+        self.assertIn("0 tópicos", self.get("/busca/topicos?participantes=ana&sem_participante=bia")[1])
+        self.assertIn("1 tópicos", self.get("/busca/topicos?q=resposta&onde=qualquer")[1])
+        self.assertIn("1 tópicos", self.get("/busca/topicos?resp_min=5")[1])
+        html = self.get("/busca/usuarios?rel_user=ana&rel=citou")[1]
+        self.assertIn("1 usuários", html)
+        self.assertIn("/membro/Bia", html)
+        self.assertIn("1 usuários", self.get("/busca/usuarios?q=an&nome_modo=comeca")[1])
+        self.assertIn("2 usuários", self.get("/busca/usuarios?com_mensagens=1")[1])
+        html = self.get("/membro/Ana")[1]
+        self.assertIn("Atividade e correlações", html)
+        self.assertIn("Quem mais o citou", html)
+
+    def test_new_posts_are_indexed(self):
+        self.post("/f/2/novo", {"nome": "Zeca", "titulo": "Tópico de teste xyzzy", "texto": "palavraunica aqui"})
+        self.assertIn("1 mensagens", self.get("/busca/mensagens?q=palavraunica")[1])
+        self.assertIn("1 tópicos", self.get("/busca/topicos?q=xyzzy")[1])
+        self.assertIn("/membro/Zeca", self.get("/busca/usuarios?q=zeca")[1])
+        self.post("/t/10/responder", {"nome": "Zeca", "texto": "outraunica"})
+        self.assertIn("1 tópicos", self.get("/busca/topicos?participantes=zeca,ana")[1])
+
+
+class QueryTest(unittest.TestCase):
+    def test_fts_query(self):
+        self.assertEqual(fts_query("a b")[0], '("a" AND "b")')
+        self.assertEqual(fts_query('"x y" -z')[0], '"x y" NOT "z"')
+        self.assertEqual(fts_query("a OR b c")[0], '(("a" OR "b") AND "c")')
+        self.assertEqual(fts_query("spr*")[0], '"spr"*')
+        self.assertEqual(fts_query('a"b')[0], '"a""b"')
+        self.assertIsNone(fts_query("-a")[0])
+
+    def test_split_quotes(self):
+        body, quoted, names = split_quotes(
+            "<blockquote><div><cite>A escreveu:</cite>q1<blockquote><div><cite>B escreveu:</cite>q2"
+            "</div></blockquote></div></blockquote>meu texto")
+        self.assertEqual(body, "meu texto")
+        self.assertIn("q1", quoted)
+        self.assertEqual(names, ["B", "A"])
+
 
 class NewSchemaTest(ServerTest):
     """Banco de versões novas do scraper: prefixo, enquetes e perfil completo."""
 
-    @classmethod
-    def setUpClass(cls):
+    def setUp(self):
         global SCHEMA
         old = SCHEMA
         SCHEMA = old + """
@@ -150,7 +212,7 @@ INSERT INTO polls VALUES (10,'Qual engine?',4,1,NULL);
 INSERT INTO poll_options VALUES (10,0,'GameMaker',3,75.0),(10,1,'Godot',1,25.0);
 """
         try:
-            super().setUpClass()
+            super().setUp()
         finally:
             SCHEMA = old
 

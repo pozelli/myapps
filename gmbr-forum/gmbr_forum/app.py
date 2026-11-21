@@ -3,6 +3,7 @@ mensagens novas num banco local separado."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -68,9 +69,10 @@ def text_to_html(body: str) -> str:
 
 
 class Forum:
-    def __init__(self, archive_path: str, local_path: str):
+    def __init__(self, archive_path: str, local_path: str, index_path: str | None = None):
         self.archive_path = archive_path
         self.local_path = local_path
+        self.index_path = index_path
         self._tls = threading.local()
         self._write_lock = threading.Lock()
         with sqlite3.connect(local_path) as c:
@@ -96,6 +98,8 @@ class Forum:
             c = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
             c.row_factory = sqlite3.Row
             c.execute("ATTACH DATABASE ? AS loc", (self.local_path,))
+            if self.index_path and os.path.exists(self.index_path):
+                c.execute("ATTACH DATABASE ? AS s", (self.index_path,))
             self._tls.conn = c
         return c
 
@@ -249,19 +253,6 @@ class Forum:
                WHERE p.author_name = ? ORDER BY p.date DESC LIMIT ?""",
             (name, limit)).fetchall()
 
-    def search(self, q: str, limit: int = 50):
-        like = f"%{q}%"
-        topics = self.db.execute(
-            f"""SELECT * FROM ({self.TOPIC_UNION}) WHERE title LIKE ?
-                ORDER BY last_date DESC LIMIT ?""", (like, limit)).fetchall()
-        posts = self.db.execute(
-            """SELECT p.id, p.topic_id, p.position, p.author_name, p.date, p.date_raw,
-                      p.content_text, t.title AS topic_title
-               FROM posts p LEFT JOIN topics t ON t.id = p.topic_id
-               WHERE p.content_text LIKE ? ORDER BY p.date DESC LIMIT ?""",
-            (like, limit)).fetchall()
-        return topics, posts
-
     def totals(self) -> dict:
         one = lambda sql: self.db.execute(sql).fetchone()[0]
         return {
@@ -280,14 +271,32 @@ class Forum:
             ts = now_iso()
             nid = c.execute("INSERT INTO new_topics (forum_id, title, author, created) "
                             "VALUES (?,?,?,?)", (fid, title, author, ts)).lastrowid
-            c.execute("INSERT INTO new_posts (topic_ref, author, body, created) VALUES (?,?,?,?)",
-                      (f"n{nid}", author, body, ts))
+            pid = c.execute("INSERT INTO new_posts (topic_ref, author, body, created) VALUES (?,?,?,?)",
+                            (f"n{nid}", author, body, ts)).lastrowid
+            c.commit()
+            self._index_post(pid, f"n{nid}", fid, author, body, ts, title)
             return nid
+
+    def _index_post(self, pid, ref, fid, author, body, ts, new_title=None):
+        if not self.index_path:
+            return
+        from .search_index import add_local_post
+        try:
+            add_local_post(self.index_path, pid, ref, fid, author, body, ts, new_title)
+        except sqlite3.Error as exc:  # o índice é reconstruído no próximo início
+            print(f"aviso: falha ao indexar mensagem local: {exc}")
 
     def add_reply(self, ref: str, author: str, body: str):
         with self._write_lock, self._write() as c:
-            c.execute("INSERT INTO new_posts (topic_ref, author, body, created) VALUES (?,?,?,?)",
-                      (ref, author, body, now_iso()))
+            ts = now_iso()
+            pid = c.execute("INSERT INTO new_posts (topic_ref, author, body, created) VALUES (?,?,?,?)",
+                            (ref, author, body, ts)).lastrowid
+            c.commit()
+            if ref[0] == "t":
+                t = self.archive_topic(int(ref[1:]))
+            else:
+                t = self.new_topic(int(ref[1:]))
+            self._index_post(pid, ref, t["forum_id"] if t else None, author, body, ts)
 
 
 # ======================================================================= HTML
@@ -304,7 +313,7 @@ a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
 header.top{background:linear-gradient(var(--head2),var(--head));color:#fff;padding:14px 0}
 header.top .wrap{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
 header.top h1{margin:0;font-size:22px}header.top h1 a{color:#fff}
-header.top nav{display:flex;gap:14px;flex:1}header.top nav a{color:#d8e8f7}
+header.top nav{display:flex;gap:4px 14px;flex:1;flex-wrap:wrap}header.top nav a{color:#d8e8f7}
 header.top form{display:flex;gap:6px}
 input,textarea,select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:4px;background:var(--card);color:var(--ink)}
 button{font:inherit;padding:6px 14px;border:0;border-radius:4px;background:var(--head2);color:#fff;cursor:pointer}
@@ -313,7 +322,7 @@ button{font:inherit;padding:6px 14px;border:0;border-radius:4px;background:var(-
 .box>h2{margin:0;padding:8px 12px;font-size:15px;background:var(--head2);color:#fff}
 table.list{width:100%;border-collapse:collapse}
 table.list th{text-align:left;font-size:12px;text-transform:uppercase;color:var(--muted);padding:6px 12px;border-bottom:1px solid var(--line)}
-table.list td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+table.list td{padding:8px 12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}
 table.list tr:nth-child(even) td{background:var(--alt)}
 td.num{text-align:center;white-space:nowrap;width:80px;color:var(--muted)}
 td.last{width:220px;font-size:13px;color:var(--muted)}
@@ -364,8 +373,8 @@ def layout(title: str, body: str, crumbs: list[tuple[str, str | None]] | None = 
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{e(title)} · GMBR</title><style>{CSS}</style></head><body>
 <header class="top"><div class="wrap"><h1><a href="/">GMBR</a></h1>
-<nav><a href="/">Índice</a><a href="/membros">Membros</a><a href="/recentes">Recentes</a></nav>
-<form action="/busca"><input name="q" value="{e(q)}" placeholder="Buscar…" aria-label="Buscar"><button>Buscar</button></form>
+<nav><a href="/">Índice</a><a href="/membros">Membros</a><a href="/recentes">Recentes</a><a href="/busca/mensagens">Busca avançada</a></nav>
+<form action="/busca/mensagens"><input name="q" value="{e(q)}" placeholder="Buscar…" aria-label="Buscar"><button>Buscar</button></form>
 </div></header><main class="wrap">{trail}{body}</main>
 <footer class="wrap">Arquivo de <a href="{ORIGIN}/" rel="noreferrer" target="_blank">gmbr.forumeiros.com</a>
 · conteúdo dos respectivos autores · mensagens novas ficam só neste servidor</footer>
@@ -414,6 +423,7 @@ def name_form_default(handler) -> str:
 class Pages:
     def __init__(self, forum: Forum):
         self.f = forum
+        self.search = None  # SearchPages, para as correlações no perfil
 
     def index(self, h):
         forums = self.f.forums()
@@ -665,6 +675,7 @@ class Pages:
         hits = "".join(self.hit(p) for p in posts) or '<div class="hit">Nenhuma mensagem arquivada.</div>'
         body = f"""<div class="box"><h2>{e(name)}</h2>
 <div style="padding:12px">{''.join(info) or 'Sem dados de perfil.'}<div style="clear:both"></div></div></div>
+{self.search.member_correlations(name) if self.search else ''}
 <div class="box"><h2>Mensagens arquivadas recentes</h2>{hits}</div>"""
         return layout(name, body, [("Índice", "/"), ("Membros", "/membros"), (name, None)])
 
@@ -681,18 +692,6 @@ class Pages:
         return f"""<div class="hit"><a class="title" href="/t/{p['topic_id']}?p={page}#p{p['id']}">{e(p['topic_title'] or f"Tópico {p['topic_id']}")}</a>
 <div class="small">{author}{e(fmt_date(p['date'], p['date_raw']))}</div><p>{snippet}</p></div>"""
 
-    def search_page(self, h, q: str):
-        q = q.strip()[:100]
-        if len(q) < 3:
-            body = '<div class="notice">Digite pelo menos 3 caracteres.</div>'
-            return layout("Busca", body, [("Índice", "/"), ("Busca", None)], q)
-        topics, posts = self.f.search(q)
-        body = f"""<div class="box"><h2>Tópicos com “{e(q)}” ({len(topics)})</h2><table class="list">
-<tr><th>Tópico</th><th>Respostas</th><th class="v">Exibições</th><th class="last">Última mensagem</th></tr>
-{self.topic_rows(topics)}</table></div>
-<div class="box"><h2>Mensagens com “{e(q)}” ({len(posts)})</h2>{''.join(self.hit(p, q) for p in posts) or '<div class="hit">Nada encontrado.</div>'}</div>"""
-        return layout(f"Busca: {q}", body, [("Índice", "/"), ("Busca", None)], q)
-
     def recent_page(self, h):
         rows = self.f.recent(50)
         body = f"""<div class="box"><h2>Tópicos com atividade recente</h2><table class="list">
@@ -704,6 +703,9 @@ class Pages:
 # ==================================================================== servidor
 def make_handler(forum: Forum):
     pages = Pages(forum)
+    from .search import SearchPages
+    search_pages = SearchPages(forum)
+    pages.search = search_pages
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "gmbr-forum"
@@ -781,7 +783,9 @@ def make_handler(forum: Forum):
             elif m := re.fullmatch(r"/membro/(.+)", path):
                 html = pages.member_page(self, unquote(m[1]))
             elif path == "/busca":
-                html = pages.search_page(self, qs.get("q", ""))
+                return self.redirect("/busca/mensagens" + (f"?{u.query}" if u.query else ""))
+            elif m := re.fullmatch(r"/busca/(mensagens|topicos|usuarios)", path):
+                html = search_pages.page(m[1], parse_qs(u.query))
             elif path == "/recentes":
                 html = pages.recent_page(self)
             if html is None:
@@ -823,8 +827,15 @@ def make_handler(forum: Forum):
     return Handler
 
 
-def serve(archive: str, local: str, host: str, port: int):
-    forum = Forum(archive, local)
+def serve(archive: str, local: str, host: str, port: int, index: str | None = None,
+          reindex: bool = False):
+    if index:
+        from .search_index import build, needs_rebuild
+        if reindex or needs_rebuild(archive, index):
+            print("Construindo o índice de busca (só na primeira vez ou quando o banco muda)…")
+            Forum(archive, local)  # garante o banco local
+            build(archive, local, index)
+    forum = Forum(archive, local, index)
     httpd = ThreadingHTTPServer((host, port), make_handler(forum))
     print(f"GMBR em http://{host}:{port}/  (arquivo: {archive}, local: {local})")
     try:

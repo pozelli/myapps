@@ -8,7 +8,7 @@ Só usa a biblioteca padrão do Python (3.9+), sem dependências.
 - **Fórum** com a lista de tópicos (fixos primeiro, depois por atividade).
 - **Tópico** com mensagens, perfil do autor, assinatura e edições. Links internos
   do gmbr (`/t123-...`) apontam para o próprio fórum local.
-- **Membros** (com filtro por nome), **perfil** (com os campos completos da página /uNN quando o
+- **Membros** (com filtro por nome), **perfil** (com correlações) (com os campos completos da página /uNN quando o
   scraper já os coletou) e as mensagens arquivadas, **busca** e **recentes**.
 - **Enquetes**, **prefixos** (ex.: `[Votação]`) e tópicos **trancados**, quando
   o banco tem essas informações. Bancos de versões antigas do scraper também funcionam.
@@ -19,6 +19,38 @@ Só usa a biblioteca padrão do Python (3.9+), sem dependências.
 
 Tópicos que o scraper só listou (sem mensagens ainda) aparecem como
 "não arquivado", com link para o original.
+
+## Busca avançada
+
+Três buscas em `/busca/mensagens`, `/busca/topicos` e `/busca/usuarios`, todas
+com facetas clicáveis (fórum, autor, ano, grupo) para refinar o resultado e
+chips com os filtros ativos.
+
+- **Texto**: ignora acentos e maiúsculas; aceita `"frase exata"`, `-excluir`,
+  `OR` e `prefixo*`; modos "todas as palavras", "qualquer palavra" e "frase".
+  O texto citado de outras mensagens fica separado e só entra se pedido.
+- **Mensagens**: autor(es), excluir autores, fórum (com/sem subfóruns),
+  tópico, datas, só mensagem inicial/respostas, com imagem/link/código/
+  citação/vídeo/spoiler, editadas, curtidas, tamanho; ordenação por
+  relevância, data, curtidas ou tamanho; agrupar por tópico.
+- **Tópicos**: texto no título, na mensagem inicial ou em qualquer mensagem;
+  criador, participantes (todos ou algum), quem respondeu, quem não
+  participou; prefixo, enquete, trancado, fixo; faixas de respostas,
+  visitas, participantes e votos; datas de criação e de atividade.
+- **Usuários**: nome, texto do perfil/assinatura, grupo, cargo, datas de
+  inscrição/último acesso/atividade, faixas de mensagens, reputação,
+  citações e curtidas, avatar/assinatura/site, fórum onde postou.
+- **Correlações**: mensagens que citam X, curtidas por Y, em tópicos de Z,
+  em tópicos onde W também postou; usuários que participaram dos mesmos
+  tópicos, citaram, foram citados, curtiram, foram curtidos, responderam ou
+  foram respondidos por alguém, com a força da relação. O perfil de cada
+  membro mostra onde ele mais postou, mensagens por ano e os principais
+  parceiros em cada tipo de relação.
+
+O índice (`data/search.sqlite`, ~270 MB, ~30 s para criar) é derivado do
+banco do scraper e reconstruído automaticamente quando o banco muda. Mensagens
+novas entram no índice na hora. Para reconstruir manualmente:
+`python3 -m gmbr_forum --index-only` (ou `--reindex` ao iniciar).
 
 ## Rodar
 
