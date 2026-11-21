@@ -67,29 +67,57 @@ Opções úteis do `crawl`:
 
 ## Dados gerados
 
-Tabelas (e arquivos do `export`):
+Schema versão 2 (`PRAGMA user_version = 2`). Bancos da versão 1 são migrados
+automaticamente ao abrir (uma transação; se falhar, nada muda).
+
+**Regra das contagens:** nada que dependa de outra tabela é guardado como
+fonte de verdade. Mensagens por tópico, tópicos por fórum, mensagens por
+membro, votos de enquete, curtidas etc. vêm das views `v_*`, contadas na hora
+(com índices). Colunas `*_forum` guardam o número que o **fórum** exibe —
+usadas no crawl incremental e para conferência (`v_count_checks`). Colunas
+"informativas" (`topics.pages`, `topics.posts_scraped`, `topic_pages.post_count`,
+`forums.topics_listed`) só registram o que a raspagem viu; nada depende delas.
+
+Tabelas:
 
 - **forums** — id, nome, url, `parent_id` (subfóruns).
-- **topics** — id, fórum, título, descrição, autor, respostas, visualizações,
-  última mensagem (id/autor/data), páginas e mensagens raspadas.
-- **posts** — id, tópico, posição no tópico, título, `author_name`, data
-  (`date_raw` original e `date` em ISO), edição (contagem e data), curtidas
-  (`liked_by`), reputação, conteúdo em texto e HTML, assinatura.
-- **members** — nome, avatar, grupo (`group_class` + `group_name`, ex.:
-  Administradores), cor, data de inscrição, reputação, nº de mensagens do
-  perfil, site, assinatura, `extra_fields` (Medalhas, Tutoriais, Moedas,
-  Ouro/Prata/Bronze, Insígnias, Notas…), `is_guest`. O export acrescenta
-  estatísticas calculadas: `posts_found`, `topics_participated`,
-  `topics_started`, `first_post_date`, `last_post_date`.
-  Com `memberlist`/`profiles` (abaixo) também: `in_memberlist`, `humor`,
-  `last_visit`, `profile_fields` (JSON com todos os campos visíveis de `/uNN`:
-  idade, "Quem sou eu", plataformas, projetos, redes sociais, notas etc.),
-  `profile_groups` (todos os grupos do membro) e `profile_scraped_at`.
-- **topics.prefix / topic_type** — prefixo da listagem (ex.: `[Votação]`) e
-  ícone (`sticky_read`, `announce_read`, `topic_read_locked`, `topic_read_hot`…).
-- **polls / poll_options** — enquetes: pergunta, total de votos, encerrada,
-  opções com votos e percentual.
-- **groups** — legenda de grupos do índice.
+- **topics** — id, fórum, título, descrição, prefixo (`[Votação]`), ícone
+  (`sticky_read`, `topic_read_locked`…), `replies_forum`, `views_forum`,
+  `last_post_id_forum`; controle do crawl (`completed`, `scraped_replies`).
+- **posts** — id, tópico, posição (0 = mensagem inicial), título,
+  `author_id` (→ members), `author_name` (nome exibido; convidados só têm este),
+  `author_id_inferred` (1 = ligado ao membro pelo nome, porque a mensagem não
+  tinha link de perfil), datas, edição, `dislikes`, conteúdo, assinatura.
+- **post_likes** — (`post_id`, `liker_name`, `user_id`): quem curtiu cada mensagem.
+- **members** — chave `user_id` (`/uNN`); nome atual, avatar, `group_id` (grupo
+  que dá a cor ao nome), cor, rank, inscrição, última visita, reputação,
+  `post_count_forum`, site, humor, idade, `about_me`, `specialty`, `platforms`,
+  `projects`, `infractions`, `grades_received`, `nick_history`; JSON brutos
+  `profile_fields` (página `/uNN`), `sidebar_fields`/`sidebar_images` (bloco ao
+  lado das mensagens).
+- **member_groups** — (`user_id`, `group_id`): todos os grupos de cada membro.
+- **member_awards** — (`user_id`, `award`, `quantity`): Medalhas, Tutoriais,
+  Moedas, Ouro, Prata, Bronze, Insígnias (só quantidades ≠ 0).
+- **groups** — id (`/gNN`), nome, cor.
+- **polls / poll_options** — pergunta, encerrada; opções com votos.
+- **topic_pages** — páginas já raspadas (retomada do crawl).
+
+Todas as relações têm chave estrangeira (verificada no commit).
+
+Views:
+
+| View | Conteúdo |
+|---|---|
+| `v_topic_stats` | mensagens, respostas, páginas, participantes, autor e 1ª/última mensagem, curtidas |
+| `v_forum_stats` | tópicos, mensagens e última mensagem por fórum |
+| `v_member_stats` | mensagens, tópicos iniciados/participados, 1ª/última mensagem, curtidas recebidas/dadas |
+| `v_guest_authors` | autores sem conta (convidados, contas apagadas) |
+| `v_poll_results` / `v_poll_options` | total de votos e percentuais |
+| `v_group_members` | membros por grupo |
+| `v_count_checks` | onde o número do fórum difere do banco |
+
+O `export` gera JSON/CSV de membros, fóruns, tópicos, mensagens, enquetes e
+autores convidados já com as contagens das views.
 
 ### Passada complementar (com login)
 
@@ -107,9 +135,9 @@ Dados de contato (e-mail, MP) e o formulário de edição do perfil não são li
 
 - Para visitantes, o fórum **não expõe páginas de perfil** (`/u123`,
   `/memberlist` e `/groups` redirecionam para o login, e o `robots.txt`
-  bloqueia `/u`). Por isso os membros são identificados pelo **nome**, e os
-  dados de perfil vêm do bloco ao lado das mensagens — que mostra o estado
-  **atual** do membro. Membros que nunca postaram não aparecem.
+  bloqueia `/u`). Os membros são identificados pelo `user_id` desse link,
+  então a raspagem de membros exige login. O bloco ao lado das mensagens
+  mostra o estado **atual** do membro.
 - **Com login**, as mensagens trazem o link `/uNN` e o scraper preenche
   `author_id` nas mensagens e `user_id`/`profile_url` nos membros (o scraper
   só acessa as páginas `/u` nos comandos `profiles`/`memberlist`). Duas formas:
@@ -122,7 +150,9 @@ Dados de contato (e-mail, MP) e o formulário de edição do perfil não são li
 
   Nunca coloque credenciais/cookies em arquivos versionados.
 - Mensagens de visitantes e de contas excluídas aparecem como **Convidado**
-  (`is_guest = 1`) — todas agrupadas sob esse nome.
+  (ou com o nome digitado), sem `author_id`; não viram membros
+  (veja `v_guest_authors`). Sem login o fórum não mostra `/uNN`, então os
+  membros só são gravados em raspagens com login.
 - Se um membro mudou de nome, as mensagens antigas aparecem com o nome novo
   (é como o fórum renderiza).
 - Datas estão no horário configurado no fórum; "Hoje/Ontem" são convertidas

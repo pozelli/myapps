@@ -136,28 +136,43 @@ def cmd_export(args):
     out.mkdir(parents=True, exist_ok=True)
 
     members = db.members_report()
-    forums = [dict(r) for r in db.forums()]
-    topics = [dict(r) for r in db.conn.execute("SELECT * FROM topics ORDER BY id")]
-    post_cols = "id, topic_id, page_start, position, title, author_name, author_id, " \
-                "date_raw, date, edit_info, edit_count, last_edit_date, likes, " \
-                "dislikes, liked_by, vote_title"
+    forums = [dict(r) for r in db.conn.execute(
+        """SELECT f.*, s.topic_count, s.post_count, s.last_post_date
+           FROM forums f JOIN v_forum_stats s ON s.forum_id = f.id ORDER BY f.id""")]
+    topics = [dict(r) for r in db.conn.execute(
+        """SELECT t.*, s.post_count, s.reply_count, s.page_count, s.participants,
+                  s.author_id, s.author_name, s.first_post_date,
+                  s.last_post_id, s.last_author_id, s.last_author_name, s.last_post_date,
+                  s.likes
+           FROM topics t JOIN v_topic_stats s ON s.topic_id = t.id ORDER BY t.id""")]
+    post_cols = "p.id, p.topic_id, p.page_start, p.position, p.title, p.author_id, " \
+                "p.author_name, p.author_id_inferred, p.date_raw, p.date, p.edit_info, " \
+                "p.edit_count, p.last_edit_date, p.dislikes, p.vote_title"
     if args.with_content:
-        post_cols += ", content_text, content_html, signature_html"
+        post_cols += ", p.content_text, p.content_html, p.signature_html"
     posts = []
-    for r in db.conn.execute(f"SELECT {post_cols} FROM posts ORDER BY topic_id, position"):
+    for r in db.conn.execute(
+            f"""SELECT {post_cols},
+                       (SELECT json_group_array(liker_name) FROM post_likes l
+                         WHERE l.post_id = p.id) AS liked_by
+                FROM posts p ORDER BY p.topic_id, p.position"""):
         d = dict(r)
         d["liked_by"] = json.loads(d["liked_by"] or "[]")
+        d["likes"] = len(d["liked_by"])
         posts.append(d)
 
     polls = []
-    for r in db.conn.execute("SELECT * FROM polls ORDER BY topic_id"):
+    for r in db.conn.execute("SELECT * FROM v_poll_results ORDER BY topic_id"):
         d = dict(r)
         d["options"] = [dict(o) for o in db.conn.execute(
-            "SELECT position, text, votes, percent FROM poll_options "
+            "SELECT position, text, votes, percent FROM v_poll_options "
             "WHERE topic_id=? ORDER BY position", (d["topic_id"],))]
         polls.append(d)
+    guests = [dict(r) for r in db.conn.execute(
+        "SELECT * FROM v_guest_authors ORDER BY post_count DESC")]
     for name, rows in (("members", members), ("forums", forums),
-                       ("topics", topics), ("posts", posts), ("polls", polls)):
+                       ("topics", topics), ("posts", posts), ("polls", polls),
+                       ("guest_authors", guests)):
         (out / f"{name}.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         _write_csv(out / f"{name}.csv", rows)
@@ -206,10 +221,11 @@ def cmd_stats(args):
     print(f"Membros:           {q('SELECT COUNT(*) FROM members')}")
     print(f"Perfis raspados:   {q('SELECT COUNT(*) FROM members WHERE profile_scraped_at IS NOT NULL')}")
     print(f"Enquetes:          {q('SELECT COUNT(*) FROM polls')}")
+    diff = q("SELECT COUNT(*) FROM v_count_checks WHERE kind='topic'")
+    print(f"Tópicos com contagem diferente do fórum: {diff}")
     print("\nTop 10 autores (mensagens raspadas):")
     for r in db.conn.execute(
-            "SELECT author_name, COUNT(*) c FROM posts GROUP BY author_name "
-            "ORDER BY c DESC LIMIT 10"):
+            "SELECT name, post_count FROM v_member_stats ORDER BY post_count DESC LIMIT 10"):
         print(f"  {r[1]:6d}  {r[0]}")
     db.close()
 

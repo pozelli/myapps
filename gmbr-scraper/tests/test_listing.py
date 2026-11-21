@@ -77,7 +77,7 @@ class ListingTests(unittest.TestCase):
         updated = [(2000, 9001), (950, 9000)] + moved
         self.assertEqual(self.crawl(updated), [0, 30])
         row = self.db.get_topic(950)
-        self.assertEqual(row["last_post_id"], 9000)
+        self.assertEqual(row["last_post_id_forum"], 9000)
         self.assertIsNotNone(self.db.get_topic(2000))
 
     def test_changes_spanning_pages_keep_going(self):
