@@ -416,7 +416,13 @@ class Crawler:
             except (RuntimeError, requests.RequestException) as e:
                 log.error("%s — seguindo", e)
                 continue
-            prof = parser.parse_profile_page(html, uid)
+            try:
+                prof = parser.parse_profile_page(html, uid)
+            except Exception as e:  # noqa: BLE001 — um perfil estranho não para o lote
+                log.error("Perfil u%d: erro ao ler a página (%r)", uid, e)
+                self.db.save_profile(uid, None, f"erro: {e!r}"[:200])
+                self.db.commit()
+                continue
             self.db.save_profile(uid, prof)
             self.db.commit()
             log.info("[%d/%d] perfil u%d %s", n, len(ids), uid, prof.get("name") or "")

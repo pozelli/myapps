@@ -613,9 +613,9 @@ def parse_profile_page(html: str, user_id: int) -> dict:
             if not label or dd is None or label.startswith(_PROFILE_SKIP):
                 continue
             if dl.get("id") == "groups-details":
-                out["groups"] = [{"id": _int(re.search(r"/g(\d+)", a["href"]).group(1)),
-                                  "name": _clean(a.get_text(" "))}
-                                 for a in dd.select("a[href^='/g']")]
+                out["groups"] = [{"id": int(m.group(1)), "name": _clean(a.get_text(" "))}
+                                 for a in dd.select("a[href^='/g']")
+                                 if (m := re.match(r"/g(\d+)", a["href"]))]
                 continue
             uneditable = dd.find("div", class_="field_uneditable")
             val_el = uneditable or dd
