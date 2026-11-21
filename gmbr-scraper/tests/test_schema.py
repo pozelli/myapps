@@ -68,7 +68,7 @@ def test_migration_from_v1(tmp_path):
     c.close()
     db = Storage(path)
     q = lambda sql: [tuple(r) for r in db.conn.execute(sql)]  # noqa: E731
-    assert q("PRAGMA user_version") == [(4,)]
+    assert q("PRAGMA user_version") == [(5,)]
     assert db.foreign_key_problems() == []
     # convidado não vira membro; o nome continua na mensagem
     assert q("SELECT user_id, name, group_id, age, about_me, post_count_forum "
@@ -231,3 +231,34 @@ def test_period_candidates(tmp_path):
         "ORDER BY post_id")]
     assert got == [(1, "Beto", "citacao", "alta", 0.9),
                    (3, "Beto", "periodo", "baixa", 0.25)]
+
+
+def test_persons_join_names(tmp_path):
+    """Nomes da mesma pessoa: edição não contradiz citação e as pistas somam."""
+    from gmbr_scraper.guesses import build_guesses
+    db = Storage(str(tmp_path / "t.sqlite"))
+    db.upsert_topic_listing({"id": 1, "forum_id": 1, "replies": 1})
+    db.upsert_post({"id": 1, "topic_id": 1, "author_name": "Convidad",
+                    "content_text": "Pergunta longa sobre colisões no jogo",
+                    "edit_info": "Última edição por V-beto em Sex 01 Jan 2010, 12:30, "
+                                 "editado 1 vez(es)",
+                    "date": "2010-01-01T10:00:00"}, 0, 0)
+    db.upsert_post({"id": 2, "topic_id": 1, "author_name": "Ana", "content_text": "r",
+                    "content_html": "<blockquote><cite>Beto escreveu:</cite>Pergunta longa "
+                                    "sobre colisões no jogo</blockquote>ok",
+                    "date": "2010-01-02T10:00:00"}, 0, 1)
+    db.commit()
+    build_guesses(db.conn)
+    q = lambda sql: [tuple(r) for r in db.conn.execute(sql)]  # noqa: E731
+    # sem pessoa: V-beto contradiz a citação e é descartado
+    assert q("SELECT name, method FROM post_author_guesses") == [("Beto", "citacao")]
+    pid = db.add_person("beto", ["Beto", "V-beto"])
+    db.commit()
+    build_guesses(db.conn)
+    assert q("SELECT name, method, confidence, person_id FROM post_author_guesses "
+             "ORDER BY method") == [("Beto", "citacao", "alta", pid),
+                                    ("V-beto", "edicao", "média", pid)]
+    assert q("SELECT name, names, score, candidates FROM v_post_author_best") == \
+        [("beto", "Beto,V-beto", 1.6, 1)]
+    assert q("SELECT label, names, guest_posts_alta FROM v_person_stats") == \
+        [("beto", "Beto, V-beto", 1)]

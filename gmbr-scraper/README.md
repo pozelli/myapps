@@ -67,7 +67,7 @@ Opções úteis do `crawl`:
 
 ## Dados gerados
 
-Schema versão 4 (`PRAGMA user_version = 4`). Bancos das versões 1 a 3 são
+Schema versão 5 (`PRAGMA user_version = 5`). Bancos das versões 1 a 4 são
 migrados automaticamente ao abrir (uma transação; se falhar, nada muda).
 
 **Regra das contagens:** nada que dependa de outra tabela é guardado como
@@ -106,6 +106,17 @@ Tabelas:
 - **groups** — id (`/gNN`), nome, cor.
 - **polls / poll_options** — pergunta, encerrada; opções com votos.
 - **topic_pages** — páginas já raspadas (retomada do crawl).
+- **persons / person_names** — pessoas por trás de vários nomes ou contas
+  (inclusive apagadas), com o grau de certeza (`informado`, `variação`,
+  `provável`). Nas sugestões de autor, nomes da mesma pessoa somam e não se
+  contradizem (a edição de um alias numa mensagem citada como outro alias não
+  é tratada como moderação).
+
+  ```bash
+  python -m gmbr_scraper person-add brendan brendan V-brendan BrendanLS "Capitão Commando"
+  python -m gmbr_scraper person-add brendan Helloading Helloader --certainty provável
+  python -m gmbr_scraper person-list
+  ```
 - **post_author_guesses** — autores prováveis das mensagens de contas apagadas
   (exibidas como "Convidado"/"Convidad"), uma linha por (mensagem, nome,
   método), com evidência em JSON. Não altera `posts.author_id`. Recalcule com
@@ -132,7 +143,8 @@ Views:
 | `v_forum_stats` | tópicos, mensagens e última mensagem por fórum |
 | `v_member_stats` | mensagens, tópicos iniciados/participados, 1ª/última mensagem, curtidas recebidas/dadas |
 | `v_guest_authors` | autores sem conta (convidados, contas apagadas) |
-| `v_post_author_best` | sugestão mais provável por mensagem (soma dos scores) e nº de candidatos |
+| `v_post_author_best` | sugestão mais provável por mensagem (soma dos scores; nomes da mesma pessoa somam) e nº de candidatos |
+| `v_person_stats` | por pessoa: nomes, contas existentes, mensagens com conta e como convidado por confiança |
 | `v_poll_results` / `v_poll_options` | total de votos e percentuais |
 | `v_group_members` | membros por grupo |
 | `v_count_checks` | onde o número do fórum difere do banco |

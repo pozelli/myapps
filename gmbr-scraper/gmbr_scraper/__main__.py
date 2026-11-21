@@ -230,6 +230,30 @@ def cmd_guess_authors(args):
         print(f"{k:>14}: {v}")
 
 
+def cmd_person_add(args):
+    db = Storage(args.db)
+    pid = db.add_person(args.label, args.names, args.certainty, args.note)
+    db.commit()
+    print(f"pessoa {pid} ({args.label}): {', '.join(args.names)} [{args.certainty}]")
+    if not args.no_rebuild:
+        from .guesses import build_guesses
+        build_guesses(db.conn)
+    db.close()
+
+
+def cmd_person_list(args):
+    db = Storage(args.db)
+    for r in db.conn.execute("SELECT * FROM v_person_stats ORDER BY person_id"):
+        print(f"[{r['person_id']}] {r['label']}")
+        for n in db.conn.execute("SELECT name, certainty FROM person_names WHERE person_id=? "
+                                 "ORDER BY name", (r["person_id"],)):
+            print(f"    {n['name']:<24} {n['certainty']}")
+        print(f"    contas: {r['accounts'] or '-'}; mensagens com conta: "
+              f"{r['posts_with_account']}; como convidado: alta {r['guest_posts_alta']}, "
+              f"média {r['guest_posts_media']}, baixa {r['guest_posts_baixa']}")
+    db.close()
+
+
 def cmd_stats(args):
     db = Storage(args.db)
     q = lambda sql: db.conn.execute(sql).fetchone()[0]  # noqa: E731
@@ -313,6 +337,19 @@ def main(argv=None):
                         help="divide os tópicos pendentes em N faixas de ID equilibradas")
     pr.add_argument("-n", type=int, default=10)
     pr.set_defaults(func=cmd_plan)
+
+    pa = sub.add_parser("person-add",
+                        help="registra nomes/contas que são da mesma pessoa")
+    pa.add_argument("label", help="nome de referência da pessoa")
+    pa.add_argument("names", nargs="+", help="nomes exatamente como aparecem no fórum")
+    pa.add_argument("--certainty", default="informado",
+                    help="informado (padrão), variação, provável…")
+    pa.add_argument("--note")
+    pa.add_argument("--no-rebuild", action="store_true",
+                    help="não recalcula as sugestões de autor agora")
+    pa.set_defaults(func=cmd_person_add)
+    pl = sub.add_parser("person-list", help="lista as pessoas registradas")
+    pl.set_defaults(func=cmd_person_list)
 
     ga = sub.add_parser("guess-authors",
                         help="recalcula sugestões de autor para mensagens de convidados")

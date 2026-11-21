@@ -110,6 +110,12 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     for uid, name, joined in members:
         by_name[name].append((uid, joined))
 
+    # Nomes da mesma pessoa (persons) contam como um só nas comparações.
+    person_of = dict(conn.execute("SELECT name, person_id FROM person_names"))
+
+    def pk(name: str):
+        return ("p", person_of[name]) if name in person_of else ("n", name)
+
     def user_for(name: str, date: str | None) -> int | None:
         cands = [u for u, j in by_name.get(name, [])
                  if not date or not j or j <= date[:10]]
@@ -121,7 +127,7 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
             "SELECT author_name, edit_info FROM posts "
             "WHERE author_id IS NOT NULL AND edit_info LIKE 'Última edição por %'"):
         m = _EDIT.match(info)
-        if m and m.group(1) != author:
+        if m and pk(m.group(1)) != pk(author):
             editors[m.group(1)] += 1
     moderators = set(editors)  # basta uma edição em mensagem alheia
 
@@ -169,7 +175,8 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         if method == "citacao":
             cited[post_id].add(name)
     conflicting = {name for post_id, name, method, _, _ in rows
-                   if method == "edicao" and cited.get(post_id) and name not in cited[post_id]}
+                   if method == "edicao" and cited.get(post_id)
+                   and pk(name) not in {pk(c) for c in cited[post_id]}}
     rows = [r for r in rows if not (r[2] == "edicao" and r[1] in conflicting)]
     if conflicting:
         log.info("Editores descartados por contradizer citações: %s", sorted(conflicting))
@@ -206,9 +213,10 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         by_pos = {p[1]: p for p in posts}
         guests = [p for p in posts
                   if p[2] is None and (p[3] or "").startswith("Convidad")]
-        topic_strong = set()
+        topic_strong: dict = defaultdict(Counter)  # pessoa/nome -> nomes citados
         for g in guests:
-            topic_strong |= strong.get(g[0], set())
+            for n in strong.get(g[0], set()):
+                topic_strong[pk(n)][n] += 1
         for g in guests:
             nxt = by_pos.get(g[1] + 1)
             if nxt and nxt[2] is not None and nxt[4]:
@@ -225,8 +233,8 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
                     rows.append((g[0], hits[0], "mencao",
                                  {"post_seguinte": nxt[0], "trecho": head[:120]}, g[7]))
             if not strong.get(g[0]) and len(topic_strong) == 1:
-                rows.append((g[0], next(iter(topic_strong)), "continuidade",
-                             {"topico": tid}, g[7]))
+                name = next(iter(topic_strong.values())).most_common(1)[0][0]
+                rows.append((g[0], name, "continuidade", {"topico": tid}, g[7]))
 
     # Ligação ao membro. Só evidência forte (citação/edição) decide a conta de
     # um nome; as pistas fracas herdam essa decisão, nunca criam uma.
@@ -235,16 +243,16 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     #               a pessoa voltou com conta nova depois de a antiga ser apagada
     names_by_post: dict[int, Counter] = defaultdict(Counter)
     for post_id, name, method, _, _ in rows:
-        names_by_post[post_id][name] += 1
+        names_by_post[post_id][pk(name)] += 1
 
     def edit_confirmed(post_id: int, name: str) -> bool:
-        return names_by_post[post_id][name] > 1  # outra pista, mesmo nome
+        return names_by_post[post_id][pk(name)] > 1  # outra pista, mesma pessoa
 
     first_join: dict[str, str] = {}
     for _uid, n, j in members:
         if j and (n not in first_join or j < first_join[n]):
             first_join[n] = j
-    rows += _period_rows(conn, rows, edit_confirmed, first_join)
+    rows += _period_rows(conn, rows, edit_confirmed, first_join, pk)
 
     name_user: dict[str, int | None] = {}
     for post_id, name, method, evidence, date in rows:
@@ -280,15 +288,15 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
             conf, score = "baixa", EDIT_ALONE_SCORE
         elif method == "periodo":
             score = round(score * evidence["fatia"], 3)
-        out.append((post_id, name, uid, link, method, conf, score,
+        out.append((post_id, name, person_of.get(name), uid, link, method, conf, score,
                     json.dumps(evidence, ensure_ascii=False)))
     conn.executemany(
-        "INSERT INTO post_author_guesses (post_id, name, user_id, user_link, method, "
-        "confidence, score, evidence) VALUES (?,?,?,?,?,?,?,?)", out)
+        "INSERT INTO post_author_guesses (post_id, name, person_id, user_id, user_link, "
+        "method, confidence, score, evidence) VALUES (?,?,?,?,?,?,?,?,?)", out)
     conn.commit()
-    stats = Counter(r[4] for r in out)
+    stats = Counter(r[5] for r in out)
     for link in ("conta", "recadastro"):
-        stats[f"ligadas_{link}"] = len({r[0] for r in out if r[3] == link})
+        stats[f"ligadas_{link}"] = len({r[0] for r in out if r[4] == link})
     stats["mensagens"] = len({r[0] for r in out})
     stats["convidados"] = conn.execute(
         f"SELECT COUNT(*) FROM posts WHERE {GUEST_FILTER}").fetchone()[0]
@@ -297,7 +305,7 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
 
 
 def _period_rows(conn: sqlite3.Connection, rows: list, edit_confirmed,
-                 first_join: dict[str, str]) -> list:
+                 first_join: dict[str, str], pk) -> list:
     """Candidatos por atividade no mesmo período (veja o docstring do módulo).
 
     Quem já tinha conta com esse nome na data da mensagem fica de fora: estaria
@@ -323,15 +331,18 @@ def _period_rows(conn: sqlite3.Connection, rows: list, edit_confirmed,
             continue
         d = datetime.fromisoformat(date)
         weight: Counter = Counter()
+        names_of: dict = defaultdict(Counter)
         n = 0
         for _, name, t, f in ident[bisect.bisect_left(when, d - span):
                                    bisect.bisect_right(when, d + span)]:
             if t == tid or first_join.get(name, "9999") <= date[:10]:
                 continue
-            weight[name] += 2 if f == fid else 1
+            weight[pk(name)] += 2 if f == fid else 1
+            names_of[pk(name)][name] += 1
             n += 1
         total = sum(weight.values())
-        for name, w in weight.most_common(PERIOD_TOP):
+        for key, w in weight.most_common(PERIOD_TOP):
+            name = names_of[key].most_common(1)[0][0]
             out.append((pid, name, "periodo",
                         {"janela_dias": PERIOD_DAYS, "fatia": round(w / total, 3),
                          "identificadas_no_periodo": n}, date))

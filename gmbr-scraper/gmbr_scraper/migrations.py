@@ -213,6 +213,32 @@ def migrate_to_v4(conn: sqlite3.Connection, version: int) -> None:
         raise
     finally:
         conn.isolation_level = old_level
-    if version == 3:
-        from .guesses import build_guesses
-        build_guesses(conn)
+
+
+def migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Pessoas (persons/person_names) e post_author_guesses.person_id. As
+    sugestões são derivadas: a tabela é recriada e recalculada."""
+    from .storage import INDEXES, TABLES, sql_statements
+
+    log.warning("Migrando o banco para o schema 5…")
+    old_level = conn.isolation_level
+    conn.commit()
+    conn.isolation_level = None
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for (view,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view'").fetchall():
+            conn.execute(f"DROP VIEW {view}")
+        conn.execute("DROP TABLE IF EXISTS post_author_guesses")
+        for stmt in sql_statements(TABLES + INDEXES):
+            conn.execute(stmt)
+        conn.execute("PRAGMA user_version=5")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_level
+    from .guesses import build_guesses
+    build_guesses(conn)

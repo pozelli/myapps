@@ -1,6 +1,6 @@
 """Persistência em SQLite. Permite interromper e retomar o crawl.
 
-Convenções do schema (versão 4):
+Convenções do schema (versão 5):
 
 * Contagens que dependem de outras tabelas (mensagens por tópico, tópicos por
   fórum, mensagens por membro, votos de uma enquete, curtidas…) NÃO são
@@ -18,7 +18,7 @@ import re
 import sqlite3
 from datetime import datetime
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS forums (
@@ -147,10 +147,27 @@ CREATE TABLE IF NOT EXISTS post_likes (
 
 -- Autores prováveis de mensagens de contas apagadas ("Convidado").
 -- Não altera posts.author_id (veja gmbr_scraper/guesses.py e v_post_author_best).
+-- Pessoas por trás de vários nomes/contas (informado por quem conhece o fórum,
+-- ou deduzido). Os nomes podem ser de contas existentes ou apagadas.
+CREATE TABLE IF NOT EXISTS persons (
+    id    INTEGER PRIMARY KEY,
+    label TEXT UNIQUE,
+    note  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS person_names (
+    name      TEXT PRIMARY KEY,  -- exatamente como aparece (autor, citação, edição)
+    person_id INTEGER REFERENCES persons(id) ON DELETE CASCADE
+                      DEFERRABLE INITIALLY DEFERRED,
+    certainty TEXT,              -- informado, provável
+    note      TEXT
+);
+
 CREATE TABLE IF NOT EXISTS post_author_guesses (
     post_id    INTEGER REFERENCES posts(id) ON DELETE CASCADE
                        DEFERRABLE INITIALLY DEFERRED,
     name       TEXT,
+    person_id  INTEGER REFERENCES persons(id) DEFERRABLE INITIALLY DEFERRED,
     user_id    INTEGER REFERENCES members(user_id) DEFERRABLE INITIALLY DEFERRED,
     user_link  TEXT,     -- conta: a conta já existia na data da mensagem
                          -- recadastro: conta de mesmo nome criada depois (a pessoa voltou)
@@ -192,6 +209,8 @@ CREATE INDEX IF NOT EXISTS idx_mawards_award    ON member_awards(award);
 CREATE INDEX IF NOT EXISTS idx_post_likes_user  ON post_likes(user_id);
 CREATE INDEX IF NOT EXISTS idx_guesses_name     ON post_author_guesses(name);
 CREATE INDEX IF NOT EXISTS idx_guesses_user     ON post_author_guesses(user_id);
+CREATE INDEX IF NOT EXISTS idx_guesses_person   ON post_author_guesses(person_id);
+CREATE INDEX IF NOT EXISTS idx_person_names_p   ON person_names(person_id);
 """
 
 # Views recriadas a cada abertura (DROP + CREATE), então mudanças aqui valem
@@ -256,24 +275,48 @@ VIEWS = {
         LEFT JOIN given g ON g.user_id = m.user_id
     """,
     # Melhor sugestão por mensagem: soma dos scores de cada nome.
+    # Melhor sugestão por mensagem. Nomes da mesma pessoa (persons) somam.
     "v_post_author_best": """
-        WITH per_name AS (
-            SELECT post_id, name, MAX(user_id) AS user_id, MAX(user_link) AS user_link,
+        WITH per_who AS (
+            SELECT post_id, COALESCE('p' || person_id, 'n:' || name) AS who,
+                   MAX(person_id) AS person_id,
+                   group_concat(DISTINCT name) AS names,
+                   MAX(user_id) AS user_id, MAX(user_link) AS user_link,
                    SUM(score) AS score,
                    group_concat(method, ',') AS methods,
                    MAX(CASE confidence WHEN 'alta' THEN 3 WHEN 'média' THEN 2 ELSE 1 END)
                        AS best_level
-            FROM post_author_guesses GROUP BY post_id, name),
+            FROM post_author_guesses GROUP BY post_id, who),
         ranked AS (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY post_id
-                                         ORDER BY score DESC, best_level DESC, name) AS rn,
+                                         ORDER BY score DESC, best_level DESC, who) AS rn,
                       COUNT(*) OVER (PARTITION BY post_id) AS candidates
-            FROM per_name)
-        SELECT post_id, name, user_id, user_link, score, methods,
-               CASE best_level WHEN 3 THEN 'alta' WHEN 2 THEN 'média' ELSE 'baixa' END
+            FROM per_who)
+        SELECT r.post_id, COALESCE(pe.label, r.names) AS name, r.names, r.person_id,
+               r.user_id, r.user_link, r.score, r.methods,
+               CASE r.best_level WHEN 3 THEN 'alta' WHEN 2 THEN 'média' ELSE 'baixa' END
                    AS confidence,
-               candidates
-        FROM ranked WHERE rn = 1
+               r.candidates
+        FROM ranked r LEFT JOIN persons pe ON pe.id = r.person_id
+        WHERE r.rn = 1
+    """,
+    # Pessoas: nomes, contas existentes com esses nomes e mensagens
+    "v_person_stats": """
+        SELECT pe.id AS person_id, pe.label,
+               (SELECT group_concat(name, ', ') FROM person_names pn
+                 WHERE pn.person_id = pe.id) AS names,
+               (SELECT group_concat(m.user_id, ', ') FROM person_names pn
+                  JOIN members m ON m.name = pn.name WHERE pn.person_id = pe.id) AS accounts,
+               (SELECT COUNT(*) FROM person_names pn JOIN members m ON m.name = pn.name
+                  JOIN posts p ON p.author_id = m.user_id
+                 WHERE pn.person_id = pe.id) AS posts_with_account,
+               (SELECT COUNT(*) FROM v_post_author_best b
+                 WHERE b.person_id = pe.id AND b.confidence = 'alta') AS guest_posts_alta,
+               (SELECT COUNT(*) FROM v_post_author_best b
+                 WHERE b.person_id = pe.id AND b.confidence = 'média') AS guest_posts_media,
+               (SELECT COUNT(*) FROM v_post_author_best b
+                 WHERE b.person_id = pe.id AND b.confidence = 'baixa') AS guest_posts_baixa
+        FROM persons pe
     """,
     "v_guest_authors": """
         SELECT author_name, COUNT(*) AS post_count,
@@ -401,12 +444,14 @@ class Storage:
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = self.conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='members'").fetchone()
-        if has_tables and version < 2:
-            from .migrations import migrate_v1
-            migrate_v1(self.conn)
-        elif has_tables and version < 4:
-            from .migrations import migrate_to_v4
-            migrate_to_v4(self.conn, version)
+        if has_tables:
+            from . import migrations
+            if version < 2:
+                migrations.migrate_v1(self.conn)  # vai direto à 4
+            elif version < 4:
+                migrations.migrate_to_v4(self.conn, version)
+            if self.conn.execute("PRAGMA user_version").fetchone()[0] < 5:
+                migrations.migrate_v4_to_v5(self.conn)
         self.conn.executescript(TABLES)
         self.conn.executescript(INDEXES)
         self._create_views()
@@ -814,6 +859,21 @@ class Storage:
             "AND id NOT IN (SELECT topic_id FROM polls) ORDER BY id").fetchall()
         ids = [r[0] for r in rows]
         return [i for i in ids if not shard or i % shard[1] == shard[0]]
+
+    # ----------------------------------------------------------------- pessoas
+    def add_person(self, label: str, names: list[str], certainty: str = "informado",
+                   note: str | None = None) -> int:
+        """Cria (ou reaproveita) a pessoa `label` e associa os nomes a ela."""
+        self.conn.execute("INSERT OR IGNORE INTO persons (label) VALUES (?)", (label,))
+        if note:
+            self.conn.execute("UPDATE persons SET note=? WHERE label=?", (note, label))
+        pid = self.conn.execute("SELECT id FROM persons WHERE label=?", (label,)).fetchone()[0]
+        for n in names:
+            self.conn.execute(
+                """INSERT INTO person_names (name, person_id, certainty) VALUES (?,?,?)
+                   ON CONFLICT(name) DO UPDATE SET person_id=excluded.person_id,
+                     certainty=excluded.certainty""", (n, pid, certainty))
+        return pid
 
     # ---------------------------------------------------------------- relatórios
     def members_report(self) -> list[dict]:
