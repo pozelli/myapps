@@ -423,7 +423,7 @@ def layout(title: str, body: str, crumbs: list[tuple[str, str | None]] | None = 
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{e(title)} · GMBR</title><style>{CSS}</style></head><body>
 <header class="top"><div class="wrap"><h1><a href="/">GMBR</a></h1>
-<nav><a href="/">Índice</a><a href="/membros">Membros</a><a href="/recentes">Recentes</a><a href="/busca/mensagens">Busca avançada</a></nav>
+<nav><a href="/">Índice</a><a href="/membros">Membros</a><a href="/recentes">Recentes</a><a href="/busca/mensagens">Busca avançada</a><a href="/rankings">Rankings</a></nav>
 <form action="/busca/mensagens"><input name="q" value="{e(q)}" placeholder="Buscar…" aria-label="Buscar"><button>Buscar</button></form>
 </div></header><main class="wrap">{trail}{body}</main>
 <footer class="wrap">Arquivo de <a href="{ORIGIN}/" rel="noreferrer" target="_blank">gmbr.forumeiros.com</a>
@@ -798,6 +798,10 @@ def make_handler(forum: Forum):
     from .search import SearchPages
     search_pages = SearchPages(forum)
     pages.search = search_pages
+    from .rankings import Rankings
+    rankings = Rankings(forum, search_pages)
+    if forum.index_path and os.path.exists(forum.index_path):
+        rankings.warm()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "gmbr-forum"
@@ -878,6 +882,8 @@ def make_handler(forum: Forum):
                 return self.redirect("/busca/mensagens" + (f"?{u.query}" if u.query else ""))
             elif m := re.fullmatch(r"/busca/(mensagens|topicos|usuarios)", path):
                 html = search_pages.page(m[1], parse_qs(u.query))
+            elif path == "/rankings":
+                html = rankings.page(parse_qs(u.query))
             elif path == "/recentes":
                 html = pages.recent_page(self)
             if html is None:

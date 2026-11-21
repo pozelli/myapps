@@ -76,6 +76,28 @@ banco do scraper e reconstruído automaticamente quando o banco muda. Mensagens
 novas entram no índice na hora. Para reconstruir manualmente:
 `python3 -m gmbr_forum --index-only` (ou `--reindex` ao iniciar).
 
+## Rankings
+
+`/rankings` mostra 28 listas de top 10, com filtro de período (anos) e a
+opção "Juntar nomes". Cada lista explica o critério na própria página.
+
+- **Pessoas**: quem mais postou; quem mais respondeu dúvidas (tópicos de
+  Perguntas e Respostas de outras pessoas); quem mais criou jogos; melhores
+  criadores (notas dos avaliadores, Hall of Fame e medalhas); mais citados;
+  mais influentes (PageRank do grafo de citações, respostas e curtidas); mais
+  importantes (Índice GMBR: média de 7 dimensões em escala logarítmica);
+  tutoriais e engines publicados; medalhas em concursos; quem conversou com
+  mais gente; veteranos; mais curtidos; maior reputação.
+- **Conteúdo**: jogos e projetos de destaque; assuntos mais falados e dúvidas
+  mais comuns (termos dos títulos); funções do GML mais discutidas;
+  ferramentas e engines mais mencionadas; tópicos mais vistos, maiores
+  discussões, mais respondidos, mais duradouros; enquetes mais votadas;
+  tutoriais mais populares; concursos com mais participantes; mensagens mais
+  curtidas; fóruns mais ativos; anos mais movimentados.
+
+Os resultados ficam em cache por combinação de filtros até o índice mudar; a
+visão padrão é calculada quando o servidor inicia.
+
 ## Rodar
 
 ```bash

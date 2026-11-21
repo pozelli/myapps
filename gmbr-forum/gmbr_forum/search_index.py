@@ -21,7 +21,7 @@ from html import unescape
 
 from . import compat
 
-INDEX_VERSION = "5"
+INDEX_VERSION = "6"
 
 SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
@@ -90,6 +90,9 @@ CREATE TABLE quotes (post_id INTEGER, quoter_lc TEXT, quoted_lc TEXT,
                      quoter_acc TEXT, quoted_acc TEXT, quoter_per TEXT, quoted_per TEXT);
 CREATE TABLE likes  (post_id INTEGER, liker_lc TEXT, liked_lc TEXT,
                      liker_acc TEXT, liked_acc TEXT, liker_per TEXT, liked_per TEXT);
+
+-- funções (estilo GML: nome_com_underscore() ) citadas em cada mensagem
+CREATE TABLE fn_mentions (post_id INTEGER, fn TEXT);
 
 -- Identidade: cada nome aponta para um nome representante da sua conta
 -- (acc_key) e da sua pessoa (per_key). Sem informação, aponta para si mesmo.
@@ -165,6 +168,8 @@ CREATE INDEX l_liked_a  ON likes(liked_acc, liker_acc);
 CREATE INDEX l_liker_p  ON likes(liker_per, liked_per);
 CREATE INDEX l_liked_p  ON likes(liked_per, liker_per);
 CREATE INDEX ident_acc  ON ident(acc_key);
+CREATE INDEX fn_fn      ON fn_mentions(fn);
+CREATE INDEX fn_post    ON fn_mentions(post_id);
 CREATE INDEX ident_per  ON ident(per_key);
 """
 
@@ -179,6 +184,14 @@ _VIDEO = re.compile(r"youtube\.com|youtu\.be|<iframe|<video|<embed|vimeo\.com", 
 _CODE = re.compile(r"codebox|<code\b|<pre\b", re.I)
 _SPOILER = re.compile(r"spoiler", re.I)
 _LINK = re.compile(r"<a\s[^>]*href=", re.I)
+_FN = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\s*\(")
+# prefixos de recursos do próprio jogo (obj_player, scr_andar...), não funções do GML
+_RESOURCE = re.compile(r"^(obj|spr|scr|snd|rm|bg|tl|fnt|sh|shd|ps|pt|ts|path|room|sound|sprite|object|"
+                       r"script|global|my|o|s|r|f|b|t|p|g|v|var|c|tile|font|timeline|tmp)_|_(obj|spr|scr)$")
+
+
+def gml_functions(text: str) -> set[str]:
+    return {f for f in _FN.findall(text.lower()) if not _RESOURCE.match(f) and len(f) <= 40}
 
 
 def html_text(html: str) -> str:
@@ -279,7 +292,7 @@ def build(archive: str, local: str, out: str, log=print) -> None:
     # ---------------------------------------------------------------- mensagens
     log("Indexando mensagens…")
     n = 0
-    batch_pm, batch_fts, batch_txt, batch_q, batch_l = [], [], [], [], []
+    batch_pm, batch_fts, batch_txt, batch_q, batch_l, batch_fn = [], [], [], [], [], []
 
     def flush():
         db.executemany("INSERT INTO pm VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)", batch_pm)
@@ -287,7 +300,8 @@ def build(archive: str, local: str, out: str, log=print) -> None:
         db.executemany("INSERT INTO post_text VALUES (?,?,?,?)", batch_txt)
         db.executemany("INSERT INTO quotes (post_id, quoter_lc, quoted_lc) VALUES (?,?,?)", batch_q)
         db.executemany("INSERT INTO likes (post_id, liker_lc, liked_lc) VALUES (?,?,?)", batch_l)
-        for b in (batch_pm, batch_fts, batch_txt, batch_q, batch_l):
+        db.executemany("INSERT INTO fn_mentions VALUES (?,?)", batch_fn)
+        for b in (batch_pm, batch_fts, batch_txt, batch_q, batch_l, batch_fn):
             b.clear()
 
     for r in src.execute(
@@ -304,6 +318,7 @@ def build(archive: str, local: str, out: str, log=print) -> None:
                          fl["has_spoiler"], fl["has_video"], len(body), 0))
         batch_fts.append((r["id"], r["title"] or "", body, quoted))
         batch_txt.append((r["id"], r["title"] or "", body, quoted))
+        batch_fn.extend((r["id"], f) for f in gml_functions(body))
         for q in dict.fromkeys(qnames):
             if lc(q) != a_lc:
                 batch_q.append((r["id"], a_lc, lc(q)))

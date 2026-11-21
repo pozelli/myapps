@@ -164,6 +164,18 @@ class ServerTest(unittest.TestCase):
         self.assertIn("Atividade e correlações", html)
         self.assertIn("Quem mais o citou", html)
 
+    def test_rankings(self):
+        status, html = self.get("/rankings")
+        self.assertEqual(status, 200)
+        self.assertIn("Quem mais postou", html)
+        self.assertIn("Dúvidas mais comuns", html)
+        self.assertNotIn("Não foi possível calcular", html)
+        self.assertIn("/membro/Ana", html)
+        for q in ("de=2020&ate=2020", "de=2030&ate=2019", "juntar=nome", "de=abc"):
+            status, html = self.get("/rankings?" + q)
+            self.assertEqual(status, 200, q)
+            self.assertNotIn("Não foi possível calcular", html, q)
+
     def test_new_posts_are_indexed(self):
         self.post("/f/2/novo", {"nome": "Zeca", "titulo": "Tópico de teste xyzzy", "texto": "palavraunica aqui"})
         self.assertIn("1 mensagens", self.get("/busca/mensagens?q=palavraunica")[1])
@@ -374,6 +386,16 @@ class SchemaV5Test(unittest.TestCase):
         self.assertIn("AnaVelha", html)
         html = self.get("/membro/Ana?juntar=nome")[1]
         self.assertIn("1</b> recebidas", html)
+
+    def test_rankings(self):
+        html = self.get("/rankings")[1]
+        self.assertNotIn("Não foi possível calcular", html)
+        # citações de AnaVelha/Fantasma/Reusado somam para a pessoa da Ana
+        cited = html.split('id="citados"')[1].split("</section>")[0]
+        self.assertIn("/membro/Ana", cited)
+        self.assertIn('<span class="rk-v">4</span>', cited)
+        cited = self.get("/rankings?juntar=nome")[1].split('id="citados"')[1].split("</section>")[0]
+        self.assertIn('<span class="rk-v">1</span>', cited)
 
     def test_search(self):
         self.assertIn("1 mensagens", self.get("/busca/mensagens?curtida_por=bia")[1])
