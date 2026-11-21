@@ -227,8 +227,10 @@ def parse_forum_page(html: str, forum_id: int) -> dict:
             dterm = row.select_one("dd.dterm")
             if dterm:
                 prefix = dterm.find("strong", recursive=False)
-                if prefix:
-                    topic["prefix"] = _clean(prefix.get_text(" ")) or None
+                text = _clean(prefix.get_text(" ")) if prefix else ""
+                # o <strong> também pode ser a paginação do tópico ("1 , 2 , 3")
+                if text and not re.fullmatch(r"[\d\s,.]+", text):
+                    topic["prefix"] = text
                 # Descrição/subtítulo: texto solto entre o título e o "por"
                 desc = [_clean(t) for t in dterm.find_all(string=True, recursive=False)]
                 desc = [d for d in desc if d]
