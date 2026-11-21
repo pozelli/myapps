@@ -262,3 +262,32 @@ def test_persons_join_names(tmp_path):
         [("beto", "Beto,V-beto", 1.6, 1)]
     assert q("SELECT label, names, guest_posts_alta FROM v_person_stats") == \
         [("beto", "Beto, V-beto", 1)]
+
+
+def test_moderation_window_and_old_nicks(tmp_path):
+    """Edição em convidado só cai se o editor moderava naquela época; editar a
+    própria mensagem com um nick antigo não é moderação."""
+    from gmbr_scraper.guesses import build_guesses
+    db = Storage(str(tmp_path / "t.sqlite"))
+    db.upsert_topic_listing({"id": 1, "forum_id": 1, "replies": 5})
+    db.upsert_member({"user_id": 7, "name": "Outro"})
+    db.upsert_member({"user_id": 8, "name": "NomeNovo"})
+    db.conn.execute("UPDATE members SET nick_history='NomeVelho' WHERE user_id=8")
+    edit = "Última edição por {} em Sex 01 Jan {}, 12:30, editado 1 vez(es)"
+    posts = [  # id, autor, author_id, editor, ano da edição
+        (1, "Outro", 7, "Mod", 2013),          # Mod modera em 2013
+        (2, "Convidad", None, "Mod", 2011),     # antes: vale (baixa)
+        (3, "Convidad", None, "Mod", 2013),     # moderando: descartada
+        (4, "NomeNovo", 8, "NomeVelho", 2012),  # própria, nick antigo
+        (5, "Convidad", None, "NomeVelho", 2012)]
+    for pid, author, uid, editor, year in posts:
+        db.upsert_post({"id": pid, "topic_id": 1, "author_name": author, "author_id": uid,
+                        "content_text": f"texto {pid}", "edit_info": edit.format(editor, year),
+                        "last_edit_date": f"{year}-01-01T12:30:00",
+                        "date": f"{year}-01-01T10:00:00"}, 0, pid)
+    db.commit()
+    build_guesses(db.conn)
+    got = [tuple(r) for r in db.conn.execute(
+        "SELECT post_id, name, confidence FROM post_author_guesses "
+        "WHERE method='edicao' ORDER BY post_id")]
+    assert got == [(2, "Mod", "baixa"), (5, "NomeVelho", "baixa")]

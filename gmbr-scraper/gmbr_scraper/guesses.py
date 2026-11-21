@@ -10,11 +10,16 @@ Métodos (score = confiança aproximada):
 * citacao     (0.9, alta)  — uma mensagem posterior do mesmo tópico cita o
                              texto desta como "X escreveu:".
 * edicao      (0.7, média) — "Última edição por X", confirmada por outra pista
-                             (citação, menção ou continuidade) com o mesmo nome. Sozinha vale
-             (0.5, baixa)    0.5: X pode ter sido moderador, inclusive com a
-                             conta apagada. Ficam de fora editores que editaram
-                             mensagens de outros membros ou mensagens que uma
-                             citação atribui a outra pessoa.
+             (0.5, baixa)    (citação, menção ou continuidade) da mesma pessoa;
+                             sozinha vale 0.5. A linha de edição guarda o nome
+                             como texto (nicks antigos, contas apagadas), enquanto
+                             o autor é resolvido pela conta — por isso ela ainda
+                             mostra quem era. Fica de fora a edição feita quando
+                             X moderava: X editou mensagem de outro membro a até
+                             60 dias da data dessa edição (nicks antigos da
+                             mesma conta e nomes da mesma pessoa não contam como
+                             "outro"). Também fica de fora quem edita mensagem
+                             que uma citação atribui a outra pessoa.
 * mencao      (0.4, baixa) — a resposta seguinte, de autor conhecido, chama
                              alguém pelo nome nos primeiros 200 caracteres
                              (ou com @), e esse nome não é de ninguém que
@@ -42,6 +47,7 @@ import logging
 import re
 import sqlite3
 from collections import Counter, defaultdict
+from datetime import datetime
 
 from bs4 import BeautifulSoup
 
@@ -51,7 +57,8 @@ SCORES = {"citacao": 0.9, "edicao": 0.7, "mencao": 0.4, "continuidade": 0.3,
           "periodo": 0.25}  # periodo: multiplicado pela fatia do candidato
 PERIOD_DAYS = 15      # janela: ±15 dias (≈ 1 mês)
 PERIOD_TOP = 3        # candidatos por mensagem
-EDIT_ALONE_SCORE = 0.5  # edição sem outra pista apontando o mesmo nome
+EDIT_ALONE_SCORE = 0.5
+MOD_WINDOW_DAYS = 60
 CONFIDENCE = {"citacao": "alta", "edicao": "média", "mencao": "baixa",
               "continuidade": "baixa", "periodo": "baixa"}
 GUEST_FILTER = "author_id IS NULL AND author_name LIKE 'Convidad%'"
@@ -110,26 +117,49 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     for uid, name, joined in members:
         by_name[name].append((uid, joined))
 
-    # Nomes da mesma pessoa (persons) contam como um só nas comparações.
+    # Nomes da mesma pessoa (persons) contam como um só nas comparações; os
+    # nicks antigos de uma conta (members.nick_history) também.
     person_of = dict(conn.execute("SELECT name, person_id FROM person_names"))
+    account_of: dict[str, set] = defaultdict(set)
+    for uid, name, hist in conn.execute(
+            "SELECT user_id, name, nick_history FROM members WHERE nick_history IS NOT NULL"):
+        for n in [x.strip() for x in hist.split("->")] + [name]:
+            if n:
+                account_of[n].add(uid)
 
     def pk(name: str):
-        return ("p", person_of[name]) if name in person_of else ("n", name)
+        if name in person_of:
+            return ("p", person_of[name])
+        uids = account_of.get(name)
+        if uids and len(uids) == 1:
+            return ("u", next(iter(uids)))
+        return ("n", name)
 
     def user_for(name: str, date: str | None) -> int | None:
         cands = [u for u, j in by_name.get(name, [])
                  if not date or not j or j <= date[:10]]
         return cands[0] if len(cands) == 1 else None
 
-    # Quem edita mensagens de outros autores (moderação) não serve de pista.
-    editors = Counter()
-    for author, info in conn.execute(
-            "SELECT author_name, edit_info FROM posts "
+    # Quem edita mensagens de outros autores está moderando. Moderação tem
+    # época (TRFN e Thopson1m só moderaram depois de voltar com conta nova),
+    # então a edição num convidado só é descartada se o editor editou mensagem
+    # alheia a até MOD_WINDOW_DAYS da data dessa edição.
+    mod_dates: dict[str, list] = defaultdict(list)
+    for author, info, edited in conn.execute(
+            "SELECT author_name, edit_info, last_edit_date FROM posts "
             "WHERE author_id IS NOT NULL AND edit_info LIKE 'Última edição por %'"):
         m = _EDIT.match(info)
-        if m and pk(m.group(1)) != pk(author):
-            editors[m.group(1)] += 1
-    moderators = set(editors)  # basta uma edição em mensagem alheia
+        if m and pk(m.group(1)) != pk(author) and edited:
+            mod_dates[m.group(1)].append(datetime.fromisoformat(edited))
+
+    def moderating(editor: str, edited: str | None) -> bool:
+        dates = mod_dates.get(editor)
+        if not dates:
+            return False
+        if not edited:
+            return True
+        d = datetime.fromisoformat(edited)
+        return any(abs((x - d).days) <= MOD_WINDOW_DAYS for x in dates)
 
     # Nomes que viram palavra comum no texto do fórum não servem para menção.
     word_freq: Counter = Counter()
@@ -146,7 +176,8 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     for tid in topics:
         posts = conn.execute(
             "SELECT id, position, author_id, author_name, content_text, content_html, "
-            "edit_info, date FROM posts WHERE topic_id=? ORDER BY position", (tid,)
+            "edit_info, date, last_edit_date FROM posts WHERE topic_id=? ORDER BY position",
+            (tid,)
         ).fetchall()
         per_topic[tid] = posts
         guests = [p for p in posts
@@ -165,7 +196,8 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
                                      {"post_que_cita": p[0]}, g[7]))
         for g in guests:
             m = _EDIT.match(g[6] or "")
-            if m and m.group(1) not in moderators and not m.group(1).startswith("Convidad"):
+            if m and not m.group(1).startswith("Convidad") \
+                    and not moderating(m.group(1), g[8]):
                 rows.append((g[0], m.group(1), "edicao", {"edit_info": g[6]}, g[7]))
 
     # Editor de mensagem que uma citação atribui a outra pessoa: provavelmente
@@ -174,9 +206,13 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     for post_id, name, method, _, _ in rows:
         if method == "citacao":
             cited[post_id].add(name)
+    def same_as(name: str, cited_name: str) -> bool:
+        # "TRFN no post anterior escreveu:" — citação com texto a mais no nome
+        return pk(name) == pk(cited_name) or cited_name.startswith(name + " ")
+
     conflicting = {name for post_id, name, method, _, _ in rows
                    if method == "edicao" and cited.get(post_id)
-                   and pk(name) not in {pk(c) for c in cited[post_id]}}
+                   and not any(same_as(name, c) for c in cited[post_id])}
     rows = [r for r in rows if not (r[2] == "edicao" and r[1] in conflicting)]
     if conflicting:
         log.info("Editores descartados por contradizer citações: %s", sorted(conflicting))
