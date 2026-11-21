@@ -67,7 +67,7 @@ Opções úteis do `crawl`:
 
 ## Dados gerados
 
-Schema versão 3 (`PRAGMA user_version = 3`). Bancos das versões 1 e 2 são
+Schema versão 4 (`PRAGMA user_version = 4`). Bancos das versões 1 a 3 são
 migrados automaticamente ao abrir (uma transação; se falhar, nada muda).
 
 **Regra das contagens:** nada que dependa de outra tabela é guardado como
@@ -88,8 +88,9 @@ Tabelas:
   `author_id` (→ members), `author_name` (nome exibido; convidados só têm este),
   `author_id_inferred` (1 = ligado ao membro pelo nome, porque a mensagem não
   tinha link de perfil), datas, edição, `dislikes`, conteúdo, `has_signature`
-  (a mensagem exibia a assinatura) e `signature_override_html` (só quando
-  exibia uma assinatura diferente da do membro — 1 caso no fórum).
+  (a mensagem exibia a assinatura do membro). A assinatura é uma só por membro;
+  o fórum às vezes pendura numa mensagem a assinatura de outra do mesmo tópico
+  (caso único: mensagem 52760, de loupa, exibe a de romulo_rla), o que é ignorado.
 - **post_likes** — (`post_id`, `liker_name`, `user_id`): quem curtiu cada mensagem.
 - **members** — chave `user_id` (`/uNN`); nome atual, avatar, `group_id` (grupo
   que dá a cor ao nome), cor, rank, inscrição, última visita, reputação,
@@ -108,7 +109,10 @@ Tabelas:
 - **post_author_guesses** — autores prováveis das mensagens de contas apagadas
   (exibidas como "Convidado"/"Convidad"), uma linha por (mensagem, nome,
   método), com evidência em JSON. Não altera `posts.author_id`. Recalcule com
-  `python -m gmbr_scraper guess-authors`. Métodos:
+  `python -m gmbr_scraper guess-authors`. `user_id`/`user_link` ligam o nome a
+  uma conta, decidido só por citação/edição: `conta` (já existia na data da
+  mensagem) ou `recadastro` (a única conta com o nome foi criada depois — a
+  pessoa voltou com conta nova após a antiga ser apagada). Métodos:
 
   | Método | Confiança | Pista |
   |---|---|---|

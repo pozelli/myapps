@@ -150,9 +150,8 @@ def cmd_export(args):
                 "p.edit_count, p.last_edit_date, p.dislikes, p.vote_title, p.has_signature"
     if args.with_content:
         post_cols += ", p.content_text, p.content_html, " \
-                     "COALESCE(p.signature_override_html, CASE WHEN p.has_signature " \
-                     "THEN (SELECT m.signature_html FROM members m " \
-                     "WHERE m.user_id = p.author_id) END) AS signature_html"
+                     "CASE WHEN p.has_signature THEN (SELECT m.signature_html FROM members m " \
+                     "WHERE m.user_id = p.author_id) END AS signature_html"
     posts = []
     for r in db.conn.execute(
             f"""SELECT {post_cols},

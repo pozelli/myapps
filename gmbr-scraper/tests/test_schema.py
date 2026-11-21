@@ -68,7 +68,7 @@ def test_migration_from_v1(tmp_path):
     c.close()
     db = Storage(path)
     q = lambda sql: [tuple(r) for r in db.conn.execute(sql)]  # noqa: E731
-    assert q("PRAGMA user_version") == [(3,)]
+    assert q("PRAGMA user_version") == [(4,)]
     assert db.foreign_key_problems() == []
     # convidado não vira membro; o nome continua na mensagem
     assert q("SELECT user_id, name, group_id, age, about_me, post_count_forum "
@@ -84,9 +84,10 @@ def test_migration_from_v1(tmp_path):
     # assinatura: uma por membro, sem o alt com o título do tópico
     assert q("SELECT signature_html FROM members WHERE user_id=1") == \
         [('<img src="l.png"/>',)]
-    assert q("SELECT id, has_signature, signature_override_html FROM posts ORDER BY id") == \
-        [(100, 1, None), (101, 0, None), (102, 0, None), (103, 1, None), (104, 0, None)]
-    assert "signature_html" not in {r[1] for r in q("PRAGMA table_info(posts)")}
+    assert q("SELECT id, has_signature FROM posts ORDER BY id") == \
+        [(100, 1), (101, 0), (102, 0), (103, 1), (104, 0)]
+    cols = {r[1] for r in q("PRAGMA table_info(posts)")}
+    assert not cols & {"signature_html", "signature_override_html"}
     assert q("SELECT liker_name, user_id FROM post_likes ORDER BY user_id") == \
         [("Ana", 1), ("Bia", 2)]
     # contagens calculadas
@@ -131,14 +132,15 @@ def test_counts_follow_posts(tmp_path):
     assert db.conn.execute("SELECT kind FROM v_count_checks").fetchall()[0][0] == "topic"
 
 
-def test_v2_to_v3_and_guesses(tmp_path):
+def test_guesses(tmp_path):
     from gmbr_scraper.guesses import build_guesses
     path = str(tmp_path / "v1.sqlite")
     c = sqlite3.connect(path)
     c.executescript(V1)
     c.executescript("""
     INSERT INTO members (name, user_id, joined_date, extra_fields, profile_images)
-      VALUES ('Moderador', 3, '2009-01-01', '{}', '[]'), ('Carlos', 4, '2009-01-01', '{}', '[]');
+      VALUES ('Moderador', 3, '2009-01-01', '{}', '[]'), ('Carlos', 4, '2009-01-01', '{}', '[]'),
+             ('Zeca', 5, '2010-02-01', '{}', '[]');  -- voltou com conta nova
     INSERT INTO topics (id, forum_id, title, replies) VALUES (20, 1, 'Ajuda', 5);
     INSERT INTO posts (id, topic_id, position, author_name, author_id, date, content_text,
                        content_html, edit_info, liked_by) VALUES
@@ -165,15 +167,16 @@ def test_v2_to_v3_and_guesses(tmp_path):
     db = Storage(path)
     stats = build_guesses(db.conn)
     q = lambda sql: [tuple(r) for r in db.conn.execute(sql)]  # noqa: E731
-    got = q("SELECT post_id, name, method, confidence FROM post_author_guesses "
-            "ORDER BY post_id, method")
-    assert got == [(200, "Zeca", "citacao", "alta"),
-                   (202, "Zeca", "edicao", "média"),
-                   (203, "Zeca", "continuidade", "baixa"),
-                   (203, "Zeca", "mencao", "baixa"),
-                   (205, "Zeca", "continuidade", "baixa")]  # não "Carlos": era citação
-    assert q("SELECT post_id, name, confidence, candidates FROM v_post_author_best "
-             "WHERE post_id=203") == [(203, "Zeca", "baixa", 1)]
+    got = q("SELECT post_id, name, method, confidence, user_id, user_link "
+            "FROM post_author_guesses ORDER BY post_id, method")
+    rec = (5, "recadastro")  # conta "Zeca" criada depois das mensagens
+    assert got == [(200, "Zeca", "citacao", "alta", *rec),
+                   (202, "Zeca", "edicao", "média", *rec),
+                   (203, "Zeca", "continuidade", "baixa", *rec),
+                   (203, "Zeca", "mencao", "baixa", *rec),
+                   (205, "Zeca", "continuidade", "baixa", *rec)]  # não "Carlos": era citação
+    assert q("SELECT post_id, name, user_link, confidence, candidates FROM v_post_author_best "
+             "WHERE post_id=203") == [(203, "Zeca", "recadastro", "baixa", 1)]
     assert stats["mensagens"] == 4
     assert q("SELECT author_id FROM posts WHERE id=200") == [(None,)]  # não altera
     db.close()

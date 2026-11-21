@@ -1,6 +1,6 @@
 """Persistência em SQLite. Permite interromper e retomar o crawl.
 
-Convenções do schema (versão 3):
+Convenções do schema (versão 4):
 
 * Contagens que dependem de outras tabelas (mensagens por tópico, tópicos por
   fórum, mensagens por membro, votos de uma enquete, curtidas…) NÃO são
@@ -18,7 +18,7 @@ import re
 import sqlite3
 from datetime import datetime
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS forums (
@@ -133,8 +133,7 @@ CREATE TABLE IF NOT EXISTS posts (
     vote_title         TEXT,
     content_html       TEXT,
     content_text       TEXT,
-    has_signature      INTEGER DEFAULT 0,  -- a mensagem exibia a assinatura do autor
-    signature_override_html TEXT,  -- só se exibia assinatura diferente de members
+    has_signature      INTEGER DEFAULT 0,  -- exibia a assinatura (members.signature_html)
     scraped_at         TEXT
 );
 
@@ -153,6 +152,8 @@ CREATE TABLE IF NOT EXISTS post_author_guesses (
                        DEFERRABLE INITIALLY DEFERRED,
     name       TEXT,
     user_id    INTEGER REFERENCES members(user_id) DEFERRABLE INITIALLY DEFERRED,
+    user_link  TEXT,     -- conta: a conta já existia na data da mensagem
+                         -- recadastro: conta de mesmo nome criada depois (a pessoa voltou)
     method     TEXT,     -- citacao, edicao, mencao, continuidade
     confidence TEXT,     -- alta, média, baixa
     score      REAL,
@@ -257,7 +258,8 @@ VIEWS = {
     # Melhor sugestão por mensagem: soma dos scores de cada nome.
     "v_post_author_best": """
         WITH per_name AS (
-            SELECT post_id, name, MAX(user_id) AS user_id, SUM(score) AS score,
+            SELECT post_id, name, MAX(user_id) AS user_id, MAX(user_link) AS user_link,
+                   SUM(score) AS score,
                    group_concat(method, ',') AS methods,
                    MAX(CASE confidence WHEN 'alta' THEN 3 WHEN 'média' THEN 2 ELSE 1 END)
                        AS best_level
@@ -267,7 +269,7 @@ VIEWS = {
                                          ORDER BY score DESC, best_level DESC, name) AS rn,
                       COUNT(*) OVER (PARTITION BY post_id) AS candidates
             FROM per_name)
-        SELECT post_id, name, user_id, score, methods,
+        SELECT post_id, name, user_id, user_link, score, methods,
                CASE best_level WHEN 3 THEN 'alta' WHEN 2 THEN 'média' ELSE 'baixa' END
                    AS confidence,
                candidates
@@ -402,9 +404,9 @@ class Storage:
         if has_tables and version < 2:
             from .migrations import migrate_v1
             migrate_v1(self.conn)
-        elif has_tables and version < 3:
-            from .migrations import migrate_v2_to_v3
-            migrate_v2_to_v3(self.conn)
+        elif has_tables and version < 4:
+            from .migrations import migrate_to_v4
+            migrate_to_v4(self.conn, version)
         self.conn.executescript(TABLES)
         self.conn.executescript(INDEXES)
         self._create_views()
@@ -610,8 +612,8 @@ class Storage:
             """INSERT INTO posts (id, topic_id, page_start, position, title,
                  author_id, author_name, date_raw, date, edit_info, edit_count,
                  last_edit_date, dislikes, vote_title, content_html, content_text,
-                 has_signature, signature_override_html, scraped_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 has_signature, scraped_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  topic_id=excluded.topic_id, page_start=excluded.page_start,
                  position=excluded.position, title=excluded.title,
@@ -625,32 +627,30 @@ class Storage:
                  dislikes=excluded.dislikes, vote_title=excluded.vote_title,
                  content_html=excluded.content_html, content_text=excluded.content_text,
                  has_signature=excluded.has_signature,
-                 signature_override_html=excluded.signature_override_html,
                  scraped_at=excluded.scraped_at""",
             (p["id"], p["topic_id"], page_start, position, p.get("title"),
              p.get("author_id"), p.get("author_name"), p.get("date_raw"), p.get("date"),
              p.get("edit_info"), p.get("edit_count"), p.get("last_edit_date"),
              p.get("dislikes"), p.get("vote_title"), p.get("content_html"),
-             p.get("content_text"), *self._signature(p), now_iso()),
+             p.get("content_text"), self._signature(p), now_iso()),
         )
         self.set_post_likes(p["id"], p.get("liked_by") or [])
 
-    def _signature(self, p: dict) -> tuple[int, str | None]:
-        """(has_signature, override). A assinatura fica uma vez em members; a
-        mensagem só guarda se a exibia e, raramente, uma versão diferente."""
+    def _signature(self, p: dict) -> int:
+        """A assinatura fica uma vez em members; a mensagem só diz se a exibia.
+
+        O fórum às vezes pendura numa mensagem a assinatura de outra do mesmo
+        tópico (bloco sig<ID de outra mensagem>); por isso a primeira vista do
+        membro não é substituída por versões diferentes."""
         sig = clean_signature(p.get("signature_html"))
         if not sig:
-            return 0, None
+            return 0
         uid = p.get("author_id")
-        if uid is None:
-            return 1, sig
-        row = self.conn.execute("SELECT signature_html FROM members WHERE user_id=?",
-                                (uid,)).fetchone()
-        if row is None or row[0] is None:
-            self.conn.execute("UPDATE members SET signature_html=? WHERE user_id=?",
-                              (sig, uid))
-            return 1, None
-        return 1, (None if row[0] == sig else sig)
+        if uid is not None:
+            self.conn.execute(
+                "UPDATE members SET signature_html=? WHERE user_id=? AND signature_html IS NULL",
+                (sig, uid))
+        return 1
 
     def set_post_likes(self, post_id: int, names: list[str]):
         self.conn.execute("DELETE FROM post_likes WHERE post_id=?", (post_id,))

@@ -17,6 +17,10 @@ Métodos (score = confiança aproximada):
                              escreveu ali perto.
 * continuidade(0.3, baixa) — outra mensagem de convidado do mesmo tópico foi
                              atribuída (por citação/edição) a um único nome.
+
+O user_id de cada nome é decidido só pelas evidências fortes: "conta" se a
+conta já existia na data da mensagem, "recadastro" se a única conta com esse
+nome foi criada depois (a pessoa voltou após ter a conta apagada).
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from bs4 import BeautifulSoup
 log = logging.getLogger("gmbr.guesses")
 
 SCORES = {"citacao": 0.9, "edicao": 0.7, "mencao": 0.4, "continuidade": 0.3}
+STRONG = ("citacao", "edicao")
 CONFIDENCE = {"citacao": "alta", "edicao": "média", "mencao": "baixa",
               "continuidade": "baixa"}
 GUEST_FILTER = "author_id IS NULL AND author_name LIKE 'Convidad%'"
@@ -194,6 +199,26 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
                 rows.append((g[0], next(iter(topic_strong)), "continuidade",
                              {"topico": tid}, g[7]))
 
+    # Ligação ao membro. Só evidência forte (citação/edição) decide a conta de
+    # um nome; as pistas fracas herdam essa decisão, nunca criam uma.
+    #  conta      — a conta de mesmo nome já existia na data da mensagem
+    #  recadastro — a única conta com esse nome foi criada DEPOIS da mensagem:
+    #               a pessoa voltou com conta nova depois de a antiga ser apagada
+    name_user: dict[str, int | None] = {}
+    for post_id, name, method, evidence, date in rows:
+        if method not in STRONG:
+            continue
+        uid = user_for(name, date)
+        if uid is None:
+            later = [u for u, j in by_name.get(name, []) if j and date and j > date[:10]]
+            all_same = len(by_name.get(name, [])) == 1
+            uid = later[0] if len(later) == 1 and all_same else None
+        if name in name_user and name_user[name] != uid:
+            name_user[name] = None  # evidências apontam contas diferentes
+        else:
+            name_user.setdefault(name, uid)
+    joined = {u: j for u, _n, j in members}
+
     seen = set()
     out = []
     for post_id, name, method, evidence, date in rows:
@@ -201,13 +226,22 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         if key in seen:
             continue
         seen.add(key)
-        out.append((post_id, name, user_for(name, date), method, CONFIDENCE[method],
+        uid = name_user.get(name)
+        link = None
+        if uid is not None:
+            j = joined.get(uid)
+            link = "conta" if (not j or not date or j <= date[:10]) else "recadastro"
+            if link == "recadastro":
+                evidence = {**evidence, "conta_criada_em": j}
+        out.append((post_id, name, uid, link, method, CONFIDENCE[method],
                     SCORES[method], json.dumps(evidence, ensure_ascii=False)))
     conn.executemany(
-        "INSERT INTO post_author_guesses (post_id, name, user_id, method, confidence, "
-        "score, evidence) VALUES (?,?,?,?,?,?,?)", out)
+        "INSERT INTO post_author_guesses (post_id, name, user_id, user_link, method, "
+        "confidence, score, evidence) VALUES (?,?,?,?,?,?,?,?)", out)
     conn.commit()
-    stats = Counter(r[3] for r in out)
+    stats = Counter(r[4] for r in out)
+    for link in ("conta", "recadastro"):
+        stats[f"ligadas_{link}"] = len({r[0] for r in out if r[3] == link})
     stats["mensagens"] = len({r[0] for r in out})
     stats["convidados"] = conn.execute(
         f"SELECT COUNT(*) FROM posts WHERE {GUEST_FILTER}").fetchone()[0]

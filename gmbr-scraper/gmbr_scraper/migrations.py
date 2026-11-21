@@ -1,4 +1,4 @@
-"""Migrações do banco: v1 (schema original) -> v3 e v2 -> v3.
+"""Migrações do banco: v1 (schema original) -> v4 e v2/v3 -> v4.
 
 Roda uma vez, numa transação só: se algo falhar, o banco fica como estava.
 """
@@ -22,7 +22,7 @@ def _cols(conn: sqlite3.Connection, table: str) -> set[str]:
 def migrate_v1(conn: sqlite3.Connection) -> None:
     from .storage import INDEXES, TABLES, _group_id, sql_statements, now_iso, profile_columns
 
-    log.warning("Migrando o banco para o schema 3…")
+    log.warning("Migrando o banco para o schema 4…")
     old_level = conn.isolation_level
     conn.commit()
     conn.isolation_level = None
@@ -144,7 +144,7 @@ def migrate_v1(conn: sqlite3.Connection) -> None:
         if problems:
             raise RuntimeError(f"chaves estrangeiras quebradas após a migração: "
                                f"{[tuple(p) for p in problems[:10]]}")
-        conn.execute("PRAGMA user_version=3")
+        conn.execute("PRAGMA user_version=4")
         conn.execute("COMMIT")
         log.warning("Migração concluída (%s)", now_iso())
     except BaseException:
@@ -156,37 +156,35 @@ def migrate_v1(conn: sqlite3.Connection) -> None:
 
 def apply_signatures(conn: sqlite3.Connection, source: str) -> None:
     """Assinatura: uma por membro (a mais exibida, sem os alt injetados pelo
-    fórum); em posts ficam só has_signature e, se diferente, o override."""
+    fórum); em posts fica só has_signature."""
     from .storage import clean_signature
 
     conn.execute("UPDATE members SET signature_html=NULL")
     per_author: dict[int, Counter] = defaultdict(Counter)
-    shown: list[tuple[int, int | None, str]] = []
+    shown: list[int] = []
     for pid, uid, html in conn.execute(
             f"SELECT id, author_id, signature_html FROM {source} "
             f"WHERE signature_html IS NOT NULL AND trim(signature_html) <> ''"):
         sig = clean_signature(html)
         if sig:
-            shown.append((pid, uid, sig))
+            shown.append(pid)
             if uid is not None:
                 per_author[uid][sig] += 1
     main = {uid: c.most_common(1)[0][0] for uid, c in per_author.items()}
     conn.executemany("UPDATE members SET signature_html=? WHERE user_id=?",
                      [(sig, uid) for uid, sig in main.items()])
-    conn.execute("UPDATE posts SET has_signature=0, signature_override_html=NULL")
-    conn.executemany(
-        "UPDATE posts SET has_signature=1, signature_override_html=? WHERE id=?",
-        [(None if uid is not None and main.get(uid) == sig else sig, pid)
-         for pid, uid, sig in shown])
-    n_over = sum(1 for pid, uid, sig in shown if uid is None or main.get(uid) != sig)
-    log.warning("Assinaturas: %d membros, %d mensagens com assinatura, %d diferentes",
-                len(main), len(shown), n_over)
+    conn.execute("UPDATE posts SET has_signature=0")
+    conn.executemany("UPDATE posts SET has_signature=1 WHERE id=?", [(p,) for p in shown])
+    log.warning("Assinaturas: %d membros, %d mensagens com assinatura",
+                len(main), len(shown))
 
 
-def migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+def migrate_to_v4(conn: sqlite3.Connection, version: int) -> None:
+    """v2 -> v4 (assinatura por membro) ou v3 -> v4 (sem override de assinatura,
+    sugestões com user_link)."""
     from .storage import INDEXES, TABLES, sql_statements
 
-    log.warning("Migrando o banco do schema 2 para o 3…")
+    log.warning("Migrando o banco do schema %d para o 4…", version)
     old_level = conn.isolation_level
     conn.commit()
     conn.isolation_level = None
@@ -196,19 +194,25 @@ def migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         for (view,) in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='view'").fetchall():
             conn.execute(f"DROP VIEW {view}")
-        conn.execute("ALTER TABLE posts ADD COLUMN has_signature INTEGER DEFAULT 0")
-        conn.execute("ALTER TABLE posts ADD COLUMN signature_override_html TEXT")
+        if version == 2:
+            conn.execute("ALTER TABLE posts ADD COLUMN has_signature INTEGER DEFAULT 0")
+            apply_signatures(conn, "posts")
+            conn.execute("ALTER TABLE posts DROP COLUMN signature_html")
+        else:
+            conn.execute("ALTER TABLE posts DROP COLUMN signature_override_html")
+            conn.execute("DROP TABLE IF EXISTS post_author_guesses")  # tabela derivada
         for stmt in sql_statements(TABLES + INDEXES):
             conn.execute(stmt)
-        apply_signatures(conn, "posts")
-        conn.execute("ALTER TABLE posts DROP COLUMN signature_html")
         problems = conn.execute("PRAGMA foreign_key_check").fetchall()
         if problems:
             raise RuntimeError(f"chaves estrangeiras quebradas: {problems[:10]}")
-        conn.execute("PRAGMA user_version=3")
+        conn.execute("PRAGMA user_version=4")
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
         raise
     finally:
         conn.isolation_level = old_level
+    if version == 3:
+        from .guesses import build_guesses
+        build_guesses(conn)
