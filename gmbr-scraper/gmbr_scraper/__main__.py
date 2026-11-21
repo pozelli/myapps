@@ -147,9 +147,12 @@ def cmd_export(args):
            FROM topics t JOIN v_topic_stats s ON s.topic_id = t.id ORDER BY t.id""")]
     post_cols = "p.id, p.topic_id, p.page_start, p.position, p.title, p.author_id, " \
                 "p.author_name, p.author_id_inferred, p.date_raw, p.date, p.edit_info, " \
-                "p.edit_count, p.last_edit_date, p.dislikes, p.vote_title"
+                "p.edit_count, p.last_edit_date, p.dislikes, p.vote_title, p.has_signature"
     if args.with_content:
-        post_cols += ", p.content_text, p.content_html, p.signature_html"
+        post_cols += ", p.content_text, p.content_html, " \
+                     "COALESCE(p.signature_override_html, CASE WHEN p.has_signature " \
+                     "THEN (SELECT m.signature_html FROM members m " \
+                     "WHERE m.user_id = p.author_id) END) AS signature_html"
     posts = []
     for r in db.conn.execute(
             f"""SELECT {post_cols},
@@ -170,9 +173,17 @@ def cmd_export(args):
         polls.append(d)
     guests = [dict(r) for r in db.conn.execute(
         "SELECT * FROM v_guest_authors ORDER BY post_count DESC")]
+    guesses = [dict(r) for r in db.conn.execute(
+        """SELECT b.*, (SELECT json_group_array(json_object(
+                          'name', g.name, 'method', g.method, 'confidence', g.confidence,
+                          'evidence', json(g.evidence)))
+                        FROM post_author_guesses g WHERE g.post_id = b.post_id) AS all_guesses
+           FROM v_post_author_best b ORDER BY b.post_id""")]
+    for d in guesses:
+        d["all_guesses"] = json.loads(d["all_guesses"] or "[]")
     for name, rows in (("members", members), ("forums", forums),
                        ("topics", topics), ("posts", posts), ("polls", polls),
-                       ("guest_authors", guests)):
+                       ("guest_authors", guests), ("author_guesses", guesses)):
         (out / f"{name}.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         _write_csv(out / f"{name}.csv", rows)
@@ -209,6 +220,15 @@ def cmd_avatars(args):
             logging.warning("Avatar de %s falhou: %s", r["name"], e)
     logging.info("%d avatares baixados em %s", ok, out)
     db.close()
+
+
+def cmd_guess_authors(args):
+    from .guesses import build_guesses
+    db = Storage(args.db)
+    stats = build_guesses(db.conn)
+    db.close()
+    for k, v in stats.items():
+        print(f"{k:>14}: {v}")
 
 
 def cmd_stats(args):
@@ -294,6 +314,10 @@ def main(argv=None):
                         help="divide os tópicos pendentes em N faixas de ID equilibradas")
     pr.add_argument("-n", type=int, default=10)
     pr.set_defaults(func=cmd_plan)
+
+    ga = sub.add_parser("guess-authors",
+                        help="recalcula sugestões de autor para mensagens de convidados")
+    ga.set_defaults(func=cmd_guess_authors)
 
     po = sub.add_parser("polls", help="raspa as enquetes dos tópicos marcados [Votação]")
     po.add_argument("--shard", metavar="I/N")

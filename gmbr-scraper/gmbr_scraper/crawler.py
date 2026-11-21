@@ -337,10 +337,10 @@ class Crawler:
                 title, forum_id = data["title"], data["forum_id"]
             last = max(last, data["last_offset"])
             for i, post in enumerate(data["posts"]):
-                self.db.upsert_post(post, start, start + i)
                 prof = post.get("profile") or {}
-                if prof.get("name"):
-                    self.db.upsert_member(prof, post["id"], post.get("signature_html"))
+                if prof.get("name"):  # antes da mensagem: ela aponta para o membro
+                    self.db.upsert_member(prof)
+                self.db.upsert_post(post, start, start + i)
                 saved += 1
             self.db.mark_page(topic_id, start, len(data["posts"]))
             self.db.commit()

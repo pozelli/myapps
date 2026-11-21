@@ -1,4 +1,4 @@
-"""Migração do banco da versão 1 (schema original) para a 2.
+"""Migrações do banco: v1 (schema original) -> v3 e v2 -> v3.
 
 Roda uma vez, numa transação só: se algo falhar, o banco fica como estava.
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections import Counter, defaultdict
 
 log = logging.getLogger("gmbr.migrations")
 
@@ -18,10 +19,10 @@ def _cols(conn: sqlite3.Connection, table: str) -> set[str]:
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
-    from .storage import INDEXES, TABLES, _group_id, now_iso, profile_columns
+def migrate_v1(conn: sqlite3.Connection) -> None:
+    from .storage import INDEXES, TABLES, _group_id, sql_statements, now_iso, profile_columns
 
-    log.warning("Migrando o banco para o schema 2…")
+    log.warning("Migrando o banco para o schema 3…")
     old_level = conn.isolation_level
     conn.commit()
     conn.isolation_level = None
@@ -47,9 +48,8 @@ def migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         for t in _OLD:
             conn.execute(f"ALTER TABLE {t} RENAME TO {t}_v1")
 
-        for stmt in (TABLES + INDEXES).split(";"):
-            if stmt.strip():
-                conn.execute(stmt)
+        for stmt in sql_statements(TABLES + INDEXES):
+            conn.execute(stmt)
 
         conn.execute("""INSERT INTO forums SELECT id, name, slug, url, parent_id,
                           topics_listed, scraped_at, listing_next_start FROM forums_v1""")
@@ -103,11 +103,12 @@ def migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         conn.execute("""INSERT INTO posts (id, topic_id, page_start, position, title,
                           author_id, author_name, date_raw, date, edit_info, edit_count,
                           last_edit_date, dislikes, vote_title, content_html, content_text,
-                          signature_html, scraped_at)
+                          scraped_at)
                         SELECT id, topic_id, page_start, position, title, author_id,
                           author_name, date_raw, date, edit_info, edit_count, last_edit_date,
-                          dislikes, vote_title, content_html, content_text, signature_html,
+                          dislikes, vote_title, content_html, content_text,
                           scraped_at FROM posts_v1""")
+        apply_signatures(conn, "posts_v1")
         # Mensagens sem link para o perfil cujo nome é de um único membro que já
         # estava inscrito na data da mensagem: liga ao membro e marca como deduzido.
         n = conn.execute("""
@@ -143,9 +144,69 @@ def migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         if problems:
             raise RuntimeError(f"chaves estrangeiras quebradas após a migração: "
                                f"{[tuple(p) for p in problems[:10]]}")
-        conn.execute("PRAGMA user_version=2")
+        conn.execute("PRAGMA user_version=3")
         conn.execute("COMMIT")
         log.warning("Migração concluída (%s)", now_iso())
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = old_level
+
+
+def apply_signatures(conn: sqlite3.Connection, source: str) -> None:
+    """Assinatura: uma por membro (a mais exibida, sem os alt injetados pelo
+    fórum); em posts ficam só has_signature e, se diferente, o override."""
+    from .storage import clean_signature
+
+    conn.execute("UPDATE members SET signature_html=NULL")
+    per_author: dict[int, Counter] = defaultdict(Counter)
+    shown: list[tuple[int, int | None, str]] = []
+    for pid, uid, html in conn.execute(
+            f"SELECT id, author_id, signature_html FROM {source} "
+            f"WHERE signature_html IS NOT NULL AND trim(signature_html) <> ''"):
+        sig = clean_signature(html)
+        if sig:
+            shown.append((pid, uid, sig))
+            if uid is not None:
+                per_author[uid][sig] += 1
+    main = {uid: c.most_common(1)[0][0] for uid, c in per_author.items()}
+    conn.executemany("UPDATE members SET signature_html=? WHERE user_id=?",
+                     [(sig, uid) for uid, sig in main.items()])
+    conn.execute("UPDATE posts SET has_signature=0, signature_override_html=NULL")
+    conn.executemany(
+        "UPDATE posts SET has_signature=1, signature_override_html=? WHERE id=?",
+        [(None if uid is not None and main.get(uid) == sig else sig, pid)
+         for pid, uid, sig in shown])
+    n_over = sum(1 for pid, uid, sig in shown if uid is None or main.get(uid) != sig)
+    log.warning("Assinaturas: %d membros, %d mensagens com assinatura, %d diferentes",
+                len(main), len(shown), n_over)
+
+
+def migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    from .storage import INDEXES, TABLES, sql_statements
+
+    log.warning("Migrando o banco do schema 2 para o 3…")
+    old_level = conn.isolation_level
+    conn.commit()
+    conn.isolation_level = None
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for (view,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='view'").fetchall():
+            conn.execute(f"DROP VIEW {view}")
+        conn.execute("ALTER TABLE posts ADD COLUMN has_signature INTEGER DEFAULT 0")
+        conn.execute("ALTER TABLE posts ADD COLUMN signature_override_html TEXT")
+        for stmt in sql_statements(TABLES + INDEXES):
+            conn.execute(stmt)
+        apply_signatures(conn, "posts")
+        conn.execute("ALTER TABLE posts DROP COLUMN signature_html")
+        problems = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if problems:
+            raise RuntimeError(f"chaves estrangeiras quebradas: {problems[:10]}")
+        conn.execute("PRAGMA user_version=3")
+        conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
         raise

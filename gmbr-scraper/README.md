@@ -67,8 +67,8 @@ Opções úteis do `crawl`:
 
 ## Dados gerados
 
-Schema versão 2 (`PRAGMA user_version = 2`). Bancos da versão 1 são migrados
-automaticamente ao abrir (uma transação; se falhar, nada muda).
+Schema versão 3 (`PRAGMA user_version = 3`). Bancos das versões 1 e 2 são
+migrados automaticamente ao abrir (uma transação; se falhar, nada muda).
 
 **Regra das contagens:** nada que dependa de outra tabela é guardado como
 fonte de verdade. Mensagens por tópico, tópicos por fórum, mensagens por
@@ -87,12 +87,16 @@ Tabelas:
 - **posts** — id, tópico, posição (0 = mensagem inicial), título,
   `author_id` (→ members), `author_name` (nome exibido; convidados só têm este),
   `author_id_inferred` (1 = ligado ao membro pelo nome, porque a mensagem não
-  tinha link de perfil), datas, edição, `dislikes`, conteúdo, assinatura.
+  tinha link de perfil), datas, edição, `dislikes`, conteúdo, `has_signature`
+  (a mensagem exibia a assinatura) e `signature_override_html` (só quando
+  exibia uma assinatura diferente da do membro — 1 caso no fórum).
 - **post_likes** — (`post_id`, `liker_name`, `user_id`): quem curtiu cada mensagem.
 - **members** — chave `user_id` (`/uNN`); nome atual, avatar, `group_id` (grupo
   que dá a cor ao nome), cor, rank, inscrição, última visita, reputação,
   `post_count_forum`, site, humor, idade, `about_me`, `specialty`, `platforms`,
-  `projects`, `infractions`, `grades_received`, `nick_history`; JSON brutos
+  `projects`, `infractions`, `grades_received`, `nick_history`,
+  `signature_html` (uma por membro; sem os `alt` com o título do tópico que o
+  fórum injeta nas imagens); JSON brutos
   `profile_fields` (página `/uNN`), `sidebar_fields`/`sidebar_images` (bloco ao
   lado das mensagens).
 - **member_groups** — (`user_id`, `group_id`): todos os grupos de cada membro.
@@ -101,6 +105,17 @@ Tabelas:
 - **groups** — id (`/gNN`), nome, cor.
 - **polls / poll_options** — pergunta, encerrada; opções com votos.
 - **topic_pages** — páginas já raspadas (retomada do crawl).
+- **post_author_guesses** — autores prováveis das mensagens de contas apagadas
+  (exibidas como "Convidado"/"Convidad"), uma linha por (mensagem, nome,
+  método), com evidência em JSON. Não altera `posts.author_id`. Recalcule com
+  `python -m gmbr_scraper guess-authors`. Métodos:
+
+  | Método | Confiança | Pista |
+  |---|---|---|
+  | `citacao` | alta | resposta posterior cita o texto como "X escreveu:" |
+  | `edicao` | média | "Última edição por X" (X não edita mensagens alheias) |
+  | `mencao` | baixa | a resposta seguinte chama X pelo nome (~65% de acerto medido contra citação/edição) |
+  | `continuidade` | baixa | outra mensagem de convidado do tópico foi atribuída a X (~30%) |
 
 Todas as relações têm chave estrangeira (verificada no commit).
 
@@ -112,12 +127,13 @@ Views:
 | `v_forum_stats` | tópicos, mensagens e última mensagem por fórum |
 | `v_member_stats` | mensagens, tópicos iniciados/participados, 1ª/última mensagem, curtidas recebidas/dadas |
 | `v_guest_authors` | autores sem conta (convidados, contas apagadas) |
+| `v_post_author_best` | sugestão mais provável por mensagem (soma dos scores) e nº de candidatos |
 | `v_poll_results` / `v_poll_options` | total de votos e percentuais |
 | `v_group_members` | membros por grupo |
 | `v_count_checks` | onde o número do fórum difere do banco |
 
 O `export` gera JSON/CSV de membros, fóruns, tópicos, mensagens, enquetes e
-autores convidados já com as contagens das views.
+autores convidados e sugestões de autor, já com as contagens das views.
 
 ### Passada complementar (com login)
 

@@ -1,6 +1,6 @@
 """Persistência em SQLite. Permite interromper e retomar o crawl.
 
-Convenções do schema (versão 2):
+Convenções do schema (versão 3):
 
 * Contagens que dependem de outras tabelas (mensagens por tópico, tópicos por
   fórum, mensagens por membro, votos de uma enquete, curtidas…) NÃO são
@@ -18,7 +18,7 @@ import re
 import sqlite3
 from datetime import datetime
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS forums (
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS members (
     infractions        TEXT,     -- "Infrações"
     grades_received    TEXT,     -- "Notas recebidas"
     nick_history       TEXT,     -- "Alterações no Nick"
-    signature_html     TEXT,
+    signature_html     TEXT,     -- uma por membro (sem os alt que o fórum injeta)
     sidebar_fields     TEXT,     -- JSON: campos do bloco ao lado das mensagens
     sidebar_images     TEXT,     -- JSON: imagens desse bloco (prêmios, notas)
     profile_fields     TEXT,     -- JSON: todos os campos da página /uNN (bruto)
@@ -133,7 +133,8 @@ CREATE TABLE IF NOT EXISTS posts (
     vote_title         TEXT,
     content_html       TEXT,
     content_text       TEXT,
-    signature_html     TEXT,
+    has_signature      INTEGER DEFAULT 0,  -- a mensagem exibia a assinatura do autor
+    signature_override_html TEXT,  -- só se exibia assinatura diferente de members
     scraped_at         TEXT
 );
 
@@ -143,6 +144,20 @@ CREATE TABLE IF NOT EXISTS post_likes (
     liker_name TEXT,     -- nome como aparece na mensagem
     user_id    INTEGER REFERENCES members(user_id) DEFERRABLE INITIALLY DEFERRED,
     PRIMARY KEY (post_id, liker_name)
+) WITHOUT ROWID;
+
+-- Autores prováveis de mensagens de contas apagadas ("Convidado").
+-- Não altera posts.author_id (veja gmbr_scraper/guesses.py e v_post_author_best).
+CREATE TABLE IF NOT EXISTS post_author_guesses (
+    post_id    INTEGER REFERENCES posts(id) ON DELETE CASCADE
+                       DEFERRABLE INITIALLY DEFERRED,
+    name       TEXT,
+    user_id    INTEGER REFERENCES members(user_id) DEFERRABLE INITIALLY DEFERRED,
+    method     TEXT,     -- citacao, edicao, mencao, continuidade
+    confidence TEXT,     -- alta, média, baixa
+    score      REAL,
+    evidence   TEXT,     -- JSON
+    PRIMARY KEY (post_id, name, method)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS polls (
@@ -174,6 +189,8 @@ CREATE INDEX IF NOT EXISTS idx_members_group    ON members(group_id);
 CREATE INDEX IF NOT EXISTS idx_mgroups_group    ON member_groups(group_id);
 CREATE INDEX IF NOT EXISTS idx_mawards_award    ON member_awards(award);
 CREATE INDEX IF NOT EXISTS idx_post_likes_user  ON post_likes(user_id);
+CREATE INDEX IF NOT EXISTS idx_guesses_name     ON post_author_guesses(name);
+CREATE INDEX IF NOT EXISTS idx_guesses_user     ON post_author_guesses(user_id);
 """
 
 # Views recriadas a cada abertura (DROP + CREATE), então mudanças aqui valem
@@ -237,6 +254,25 @@ VIEWS = {
         LEFT JOIN recv r  ON r.author_id = m.user_id
         LEFT JOIN given g ON g.user_id = m.user_id
     """,
+    # Melhor sugestão por mensagem: soma dos scores de cada nome.
+    "v_post_author_best": """
+        WITH per_name AS (
+            SELECT post_id, name, MAX(user_id) AS user_id, SUM(score) AS score,
+                   group_concat(method, ',') AS methods,
+                   MAX(CASE confidence WHEN 'alta' THEN 3 WHEN 'média' THEN 2 ELSE 1 END)
+                       AS best_level
+            FROM post_author_guesses GROUP BY post_id, name),
+        ranked AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY post_id
+                                         ORDER BY score DESC, best_level DESC, name) AS rn,
+                      COUNT(*) OVER (PARTITION BY post_id) AS candidates
+            FROM per_name)
+        SELECT post_id, name, user_id, score, methods,
+               CASE best_level WHEN 3 THEN 'alta' WHEN 2 THEN 'média' ELSE 'baixa' END
+                   AS confidence,
+               candidates
+        FROM ranked WHERE rn = 1
+    """,
     "v_guest_authors": """
         SELECT author_name, COUNT(*) AS post_count,
                MIN(date) AS first_post_date, MAX(date) AS last_post_date
@@ -289,6 +325,17 @@ AWARD_FIELDS = ("Medalhas", "Tutoriais", "Moedas", "Ouro", "Prata", "Bronze",
                 "Insignia 1", "Insignia 2", "Insignia 3")
 
 
+def sql_statements(script: str) -> list[str]:
+    """Divide um script em comandos completos (respeita ';' em comentários)."""
+    out, buf = [], ""
+    for line in script.splitlines(keepends=True):
+        buf += line
+        if sqlite3.complete_statement(buf):
+            out.append(buf)
+            buf = ""
+    return out
+
+
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
@@ -325,6 +372,18 @@ def profile_columns(fields: dict) -> tuple[dict, dict]:
     return cols, awards
 
 
+_IMG_TEXT_ATTR = re.compile(r"""\s(?:alt|title)=(?:"[^"]*"|'[^']*')""")
+
+
+def clean_signature(html: str | None) -> str | None:
+    """Tira de <img> os alt/title, onde o fórum injeta o título do tópico
+    (a mesma assinatura vinha diferente em cada tópico)."""
+    if not html or not html.strip():
+        return None
+    return re.sub(r"<img\b[^>]*>", lambda m: _IMG_TEXT_ATTR.sub("", m.group(0)),
+                  html).strip()
+
+
 def _group_id(group_class: str | None) -> int | None:
     m = re.fullmatch(r"group-(\d+)", group_class or "")
     return int(m.group(1)) if m else None
@@ -341,8 +400,11 @@ class Storage:
         has_tables = self.conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='members'").fetchone()
         if has_tables and version < 2:
-            from .migrations import migrate_v1_to_v2
-            migrate_v1_to_v2(self.conn)
+            from .migrations import migrate_v1
+            migrate_v1(self.conn)
+        elif has_tables and version < 3:
+            from .migrations import migrate_v2_to_v3
+            migrate_v2_to_v3(self.conn)
         self.conn.executescript(TABLES)
         self.conn.executescript(INDEXES)
         self._create_views()
@@ -548,8 +610,8 @@ class Storage:
             """INSERT INTO posts (id, topic_id, page_start, position, title,
                  author_id, author_name, date_raw, date, edit_info, edit_count,
                  last_edit_date, dislikes, vote_title, content_html, content_text,
-                 signature_html, scraped_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 has_signature, signature_override_html, scraped_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                  topic_id=excluded.topic_id, page_start=excluded.page_start,
                  position=excluded.position, title=excluded.title,
@@ -562,14 +624,33 @@ class Storage:
                  edit_count=excluded.edit_count, last_edit_date=excluded.last_edit_date,
                  dislikes=excluded.dislikes, vote_title=excluded.vote_title,
                  content_html=excluded.content_html, content_text=excluded.content_text,
-                 signature_html=excluded.signature_html, scraped_at=excluded.scraped_at""",
+                 has_signature=excluded.has_signature,
+                 signature_override_html=excluded.signature_override_html,
+                 scraped_at=excluded.scraped_at""",
             (p["id"], p["topic_id"], page_start, position, p.get("title"),
              p.get("author_id"), p.get("author_name"), p.get("date_raw"), p.get("date"),
              p.get("edit_info"), p.get("edit_count"), p.get("last_edit_date"),
              p.get("dislikes"), p.get("vote_title"), p.get("content_html"),
-             p.get("content_text"), p.get("signature_html"), now_iso()),
+             p.get("content_text"), *self._signature(p), now_iso()),
         )
         self.set_post_likes(p["id"], p.get("liked_by") or [])
+
+    def _signature(self, p: dict) -> tuple[int, str | None]:
+        """(has_signature, override). A assinatura fica uma vez em members; a
+        mensagem só guarda se a exibia e, raramente, uma versão diferente."""
+        sig = clean_signature(p.get("signature_html"))
+        if not sig:
+            return 0, None
+        uid = p.get("author_id")
+        if uid is None:
+            return 1, sig
+        row = self.conn.execute("SELECT signature_html FROM members WHERE user_id=?",
+                                (uid,)).fetchone()
+        if row is None or row[0] is None:
+            self.conn.execute("UPDATE members SET signature_html=? WHERE user_id=?",
+                              (sig, uid))
+            return 1, None
+        return 1, (None if row[0] == sig else sig)
 
     def set_post_likes(self, post_id: int, names: list[str]):
         self.conn.execute("DELETE FROM post_likes WHERE post_id=?", (post_id,))
@@ -608,9 +689,9 @@ class Storage:
         self.conn.execute(
             """INSERT INTO members (user_id, name, profile_url, avatar_url, group_id,
                  color, rank_title, rank_image, joined_raw, joined_date, reputation,
-                 post_count_forum, website, signature_html, sidebar_fields, sidebar_images,
+                 post_count_forum, website, sidebar_fields, sidebar_images,
                  updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(user_id) DO UPDATE SET
                  name=COALESCE(excluded.name, members.name),
                  profile_url=COALESCE(excluded.profile_url, members.profile_url),
@@ -625,7 +706,6 @@ class Storage:
                  post_count_forum=COALESCE(excluded.post_count_forum,
                                            members.post_count_forum),
                  website=COALESCE(excluded.website, members.website),
-                 signature_html=COALESCE(excluded.signature_html, members.signature_html),
                  sidebar_fields=CASE WHEN excluded.sidebar_fields <> '{}'
                                    THEN excluded.sidebar_fields ELSE members.sidebar_fields END,
                  sidebar_images=CASE WHEN excluded.sidebar_images <> '[]'
@@ -635,7 +715,6 @@ class Storage:
              gid, prof.get("color"), prof.get("rank_title"),
              prof.get("rank_image"), prof.get("joined_raw"), prof.get("joined_date"),
              prof.get("reputation"), prof.get("post_count"), prof.get("website"),
-             signature_html,
              json.dumps(prof.get("extra_fields") or {}, ensure_ascii=False),
              json.dumps(prof.get("profile_images") or [], ensure_ascii=False),
              now_iso()),

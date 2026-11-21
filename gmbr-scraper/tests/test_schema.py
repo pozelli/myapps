@@ -47,10 +47,15 @@ INSERT INTO members (name, user_id, group_class, post_count, joined_date, profil
           '[{"id": 14, "name": "Administradores"}, {"id": 8, "name": "Membros"}]', '{}', '[]'),
          ('Bia', 2, NULL, 1, '2015-01-01', NULL, NULL, '{}', '[]'),
          ('Convidado', NULL, NULL, NULL, NULL, NULL, NULL, '{}', '[]');
-INSERT INTO posts (id, topic_id, position, author_name, author_id, date, likes, liked_by) VALUES
-  (100, 10, 0, 'Ana', 1, '2012-01-01T10:00:00', 2, '["Bia", "Ana"]'),
-  (101, 10, 1, 'Bia', NULL, '2016-01-01T10:00:00', 0, '[]'),
-  (102, 10, 2, 'Convidado', NULL, '2016-01-02T10:00:00', 0, '[]');
+INSERT INTO posts (id, topic_id, position, author_name, author_id, date, likes, liked_by,
+  signature_html) VALUES
+  (100, 10, 0, 'Ana', 1, '2012-01-01T10:00:00', 2, '["Bia", "Ana"]',
+   '<img alt="Olá Logo" src="l.png"/>'),
+  (101, 10, 1, 'Bia', NULL, '2016-01-01T10:00:00', 0, '[]', NULL),
+  (102, 10, 2, 'Convidado', NULL, '2016-01-02T10:00:00', 0, '[]', ''),
+  (103, 10, 3, 'Ana', 1, '2016-01-03T10:00:00', 0, '[]',
+   '<img alt=''Outro tópico Logo'' src="l.png"/>'),
+  (104, 10, 4, 'Ana', 1, '2016-01-04T10:00:00', 0, '[]', NULL);
 INSERT INTO polls VALUES (10, 'Qual?', 5, 0, NULL);
 INSERT INTO poll_options VALUES (10, 0, 'A', 2, 40.0), (10, 1, 'B', 3, 60.0);
 """
@@ -63,7 +68,7 @@ def test_migration_from_v1(tmp_path):
     c.close()
     db = Storage(path)
     q = lambda sql: [tuple(r) for r in db.conn.execute(sql)]  # noqa: E731
-    assert q("PRAGMA user_version") == [(2,)]
+    assert q("PRAGMA user_version") == [(3,)]
     assert db.foreign_key_problems() == []
     # convidado não vira membro; o nome continua na mensagem
     assert q("SELECT user_id, name, group_id, age, about_me, post_count_forum "
@@ -75,18 +80,24 @@ def test_migration_from_v1(tmp_path):
     assert q("SELECT name FROM groups WHERE id=8") == [("Membros",)]
     # mensagem sem link, nome de membro já inscrito na data: ligada e marcada
     assert q("SELECT id, author_id, author_id_inferred FROM posts ORDER BY id") == \
-        [(100, 1, 0), (101, 2, 1), (102, None, 0)]
+        [(100, 1, 0), (101, 2, 1), (102, None, 0), (103, 1, 0), (104, 1, 0)]
+    # assinatura: uma por membro, sem o alt com o título do tópico
+    assert q("SELECT signature_html FROM members WHERE user_id=1") == \
+        [('<img src="l.png"/>',)]
+    assert q("SELECT id, has_signature, signature_override_html FROM posts ORDER BY id") == \
+        [(100, 1, None), (101, 0, None), (102, 0, None), (103, 1, None), (104, 0, None)]
+    assert "signature_html" not in {r[1] for r in q("PRAGMA table_info(posts)")}
     assert q("SELECT liker_name, user_id FROM post_likes ORDER BY user_id") == \
         [("Ana", 1), ("Bia", 2)]
     # contagens calculadas
     assert q("SELECT post_count, reply_count, author_name, last_author_name, likes "
-             "FROM v_topic_stats") == [(3, 2, "Ana", "Convidado", 2)]
+             "FROM v_topic_stats") == [(5, 4, "Ana", "Ana", 2)]
     assert q("SELECT user_id, post_count, topics_started, likes_received, likes_given "
-             "FROM v_member_stats ORDER BY user_id") == [(1, 1, 1, 2, 1), (2, 1, 0, 0, 1)]
+             "FROM v_member_stats ORDER BY user_id") == [(1, 3, 1, 2, 1), (2, 1, 0, 0, 1)]
     assert q("SELECT total_votes, option_count FROM v_poll_results") == [(5, 2)]
     assert q("SELECT percent FROM v_poll_options ORDER BY position") == [(40.0,), (60.0,)]
     assert q("SELECT kind, ref_id FROM v_count_checks ORDER BY kind, ref_id") == \
-        [("member", 1)]  # perfil diz 9, banco tem 1
+        [("member", 1), ("topic", 10)]  # perfil diz 9 (banco 3); tópico diz 3 (banco 5)
     assert q("SELECT author_name, post_count FROM v_guest_authors") == [("Convidado", 1)]
     names = {r[0] for r in q("SELECT name FROM sqlite_master WHERE type='index'")}
     assert {"idx_posts_topic_pos", "idx_posts_author", "idx_posts_authorname"} <= names
@@ -118,3 +129,43 @@ def test_counts_follow_posts(tmp_path):
     row = db.conn.execute("SELECT post_count, likes FROM v_topic_stats").fetchone()
     assert tuple(row) == (1, 0)  # nada a "atualizar": as views contam na hora
     assert db.conn.execute("SELECT kind FROM v_count_checks").fetchall()[0][0] == "topic"
+
+
+def test_v2_to_v3_and_guesses(tmp_path):
+    from gmbr_scraper.guesses import build_guesses
+    path = str(tmp_path / "v1.sqlite")
+    c = sqlite3.connect(path)
+    c.executescript(V1)
+    c.executescript("""
+    INSERT INTO members (name, user_id, joined_date, extra_fields, profile_images)
+      VALUES ('Moderador', 3, '2009-01-01', '{}', '[]'), ('Carlos', 4, '2009-01-01', '{}', '[]');
+    INSERT INTO topics (id, forum_id, title, replies) VALUES (20, 1, 'Ajuda', 5);
+    INSERT INTO posts (id, topic_id, position, author_name, author_id, date, content_text,
+                       content_html, edit_info, liked_by) VALUES
+      (200, 20, 0, 'Convidad', NULL, '2010-01-01T10:00:00',
+       'Como faço para mover o personagem com o teclado no jogo?', '', NULL, '[]'),
+      (201, 20, 1, 'Ana', 1, '2010-01-01T11:00:00', 'resposta',
+       '<blockquote><cite>Zeca escreveu:</cite>Como faço para mover o personagem com o
+        teclado no jogo?</blockquote>Use as setas.', NULL, '[]'),
+      (202, 20, 2, 'Convidad', NULL, '2010-01-01T12:00:00', 'Valeu, funcionou!', '',
+       'Última edição por Zeca em Sex 01 Jan 2010, 12:30, editado 1 vez(es)', '[]'),
+      (203, 20, 3, 'Convidad', NULL, '2010-01-01T13:00:00', 'Mais uma dúvida.', '', NULL,
+       '[]'),
+      (204, 20, 4, 'Carlos', 4, '2010-01-01T14:00:00', 'Zeca, abre outro tópico.', '',
+       NULL, '[]');
+    """)
+    c.close()
+    db = Storage(path)
+    stats = build_guesses(db.conn)
+    q = lambda sql: [tuple(r) for r in db.conn.execute(sql)]  # noqa: E731
+    got = q("SELECT post_id, name, method, confidence FROM post_author_guesses "
+            "ORDER BY post_id, method")
+    assert got == [(200, "Zeca", "citacao", "alta"),
+                   (202, "Zeca", "edicao", "média"),
+                   (203, "Zeca", "continuidade", "baixa"),
+                   (203, "Zeca", "mencao", "baixa")]
+    assert q("SELECT post_id, name, confidence, candidates FROM v_post_author_best "
+             "WHERE post_id=203") == [(203, "Zeca", "baixa", 1)]
+    assert stats["mensagens"] == 3
+    assert q("SELECT author_id FROM posts WHERE id=200") == [(None,)]  # não altera
+    db.close()
