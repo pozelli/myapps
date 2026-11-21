@@ -224,16 +224,21 @@ class Forum:
     def member(self, name: str):
         return self.members_by_name([name]).get(name)
 
-    def members(self, page: int, per: int = 50):
+    def members(self, page: int, per: int = 50, q: str = ""):
+        where = "COALESCE(m.is_guest, 0) = 0"
+        args: list = []
+        if q:
+            where += " AND m.name LIKE ? ESCAPE '\\'"
+            args.append("%" + re.sub(r"([%_\\])", r"\\\1", q) + "%")
         rows = self.db.execute(
             """SELECT m.*, g.name AS group_name, g.color AS group_color,
                       (SELECT COUNT(*) FROM posts p WHERE p.author_name = m.name) AS found
                FROM members m LEFT JOIN groups g ON g.class = m.group_class
-               WHERE COALESCE(m.is_guest, 0) = 0
-               ORDER BY COALESCE(m.post_count, 0) DESC, m.name LIMIT ? OFFSET ?""",
-            (per, (page - 1) * per)).fetchall()
+               WHERE {where}
+               ORDER BY COALESCE(m.post_count, 0) DESC, m.name LIMIT ? OFFSET ?""".replace("{where}", where),
+            (*args, per, (page - 1) * per)).fetchall()
         total = self.db.execute(
-            "SELECT COUNT(*) FROM members WHERE COALESCE(is_guest,0)=0").fetchone()[0]
+            f"SELECT COUNT(*) FROM members m WHERE {where}", args).fetchone()[0]
         return rows, total
 
     def member_posts(self, name: str, limit: int = 30):
@@ -390,6 +395,12 @@ def member_link(name: str | None, m=None) -> str:
     return f'<a href="/membro/{quote(name)}"{style}>{e(name)}</a>'
 
 
+def prefix_html(prefix: str | None, title: str | None) -> str:
+    if not prefix or (title or "").lower().startswith(prefix.lower()):
+        return ""
+    return f'<span class="small">{e(prefix)}</span> '
+
+
 def topic_href(ref: str) -> str:
     return f"/{ref[0]}/{ref[1:]}"
 
@@ -454,7 +465,7 @@ class Pages:
             if t["section"] and ("Fixo" in t["section"] or "Anúncio" in t["section"]):
                 tags += f'<span class="tag">{e(t["section"])}</span>'
             desc = f'<div class="desc">{e(t["description"])}</div>' if t["description"] else ""
-            out.append(f"""<tr><td>{(e(t['prefix']) + ' ') if t['prefix'] else ''}<a class="title" href="{topic_href(t['ref'])}">{e(t['title'])}</a>{tags}{desc}
+            out.append(f"""<tr><td>{prefix_html(t['prefix'], t['title'])}<a class="title" href="{topic_href(t['ref'])}">{e(t['title'])}</a>{tags}{desc}
 <div class="small">por {member_link(t['author'])}</div></td>
 <td class="num">{max(t['replies'] or 0, 0)}</td><td class="num v">{e(t['views'] if t['views'] is not None else '–')}</td>
 <td class="last">{member_link(t['last_author'])}<br>{e(fmt_date(t['last_date']))}</td></tr>""")
@@ -496,7 +507,9 @@ class Pages:
             if not t:
                 return None
             title, fid = t["title"], t["forum_id"]
+            prefix = t["prefix"] if "prefix" in t.keys() else None
         else:
+            prefix = None
             t = self.f.new_topic(int(ref[1:]))
             if not t:
                 return None
@@ -528,7 +541,7 @@ class Pages:
 <div class="row"><input name="nome" required maxlength="40" placeholder="Seu nome" value="{e(name_form_default(h))}"></div>
 <textarea name="texto" required maxlength="20000" placeholder="Mensagem"></textarea>
 <div><button>Enviar resposta</button></div></form></div>""")
-        return layout(title or "Tópico", f"<h2>{e(title)}</h2>" + "".join(html), crumbs)
+        return layout(title or "Tópico", f"<h2>{prefix_html(prefix, title)}{e(title)}</h2>" + "".join(html), crumbs)
 
     def render_poll(self, poll, opts) -> str:
         if not poll:
@@ -584,14 +597,16 @@ class Pages:
 <div class="body"><div class="meta"><span>{e(p['title'] or '')}{new}</span>
 <a href="#{anchor}">{e(date)}</a></div><div class="content">{content}</div>{extra}</div></article>"""
 
-    def members_page(self, h, page: int):
-        rows, total = self.f.members(page)
+    def members_page(self, h, page: int, q: str = ""):
+        q = q.strip()[:40]
+        rows, total = self.f.members(page, q=q)
         trs = "".join(
             f"""<tr><td>{member_link(m['name'], m)}<div class="small">{e(m['group_name'] or m['rank_title'] or '')}</div></td>
 <td class="num">{e(m['post_count'] if m['post_count'] is not None else '–')}</td>
 <td class="num v">{m['found']}</td><td class="last">{e(m['joined_raw'] or '')}</td></tr>""" for m in rows)
-        pg = pager("/membros", page, total, 50)
-        body = f"""{pg}<div class="box"><h2>Membros ({total})</h2><table class="list">
+        pg = pager("/membros" + (f"?q={quote(q)}" if q else ""), page, total, 50)
+        form = f"""<form action="/membros" class="pages"><input name="q" value="{e(q)}" placeholder="Filtrar por nome" aria-label="Filtrar por nome"><button>Filtrar</button></form>"""
+        body = f"""{form}{pg}<div class="box"><h2>Membros ({total})</h2><table class="list">
 <tr><th>Nome</th><th>Mensagens</th><th class="v">Arquivadas</th><th class="last">Inscrição</th></tr>{trs}</table></div>{pg}"""
         return layout("Membros", body, [("Índice", "/"), ("Membros", None)])
 
@@ -762,7 +777,7 @@ def make_handler(forum: Forum):
                 start = int(qs["start"]) if qs.get("start", "").isdigit() else None
                 html = pages.topic_page(self, m[1] + m[2], page, start)
             elif path == "/membros":
-                html = pages.members_page(self, page)
+                html = pages.members_page(self, page, qs.get("q", ""))
             elif m := re.fullmatch(r"/membro/(.+)", path):
                 html = pages.member_page(self, unquote(m[1]))
             elif path == "/busca":

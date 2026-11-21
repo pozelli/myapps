@@ -8,7 +8,7 @@ Só usa a biblioteca padrão do Python (3.9+), sem dependências.
 - **Fórum** com a lista de tópicos (fixos primeiro, depois por atividade).
 - **Tópico** com mensagens, perfil do autor, assinatura e edições. Links internos
   do gmbr (`/t123-...`) apontam para o próprio fórum local.
-- **Membros**, **perfil** (com os campos completos da página /uNN quando o
+- **Membros** (com filtro por nome), **perfil** (com os campos completos da página /uNN quando o
   scraper já os coletou) e as mensagens arquivadas, **busca** e **recentes**.
 - **Enquetes**, **prefixos** (ex.: `[Votação]`) e tópicos **trancados**, quando
   o banco tem essas informações. Bancos de versões antigas do scraper também funcionam.

@@ -110,6 +110,9 @@ class ServerTest(unittest.TestCase):
         self.assertIn("ainda não foi totalmente arquivado", html)
         self.assertIn("Moedas", self.get("/membro/Ana")[1])
         self.assertIn("Bia", self.get("/membros")[1])
+        html = self.get("/membros?q=an")[1]
+        self.assertIn("/membro/Ana", html)
+        self.assertNotIn("/membro/Bia", html)
         self.assertIn("resposta", self.get("/busca?q=resposta")[1])
         self.assertEqual(self.get("/t/999")[0], 404)
         self.assertEqual(self.get("/membro/Ninguem")[0], 404)
@@ -157,6 +160,7 @@ INSERT INTO poll_options VALUES (10,0,'GameMaker',3,75.0),(10,1,'Godot',1,25.0);
         self.assertIn("trancado", html)
         html = self.get("/t/10")[1]
         self.assertIn("Enquete: Qual engine?", html)
+        self.assertIn("[Votação]</span> Motor de plataforma", html)
         self.assertIn("75%", html)
         self.assertIn("encerrada", html)
         html = self.get("/membro/Ana")[1]
