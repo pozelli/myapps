@@ -121,17 +121,17 @@ Tabelas:
   (exibidas como "Convidado"/"Convidad"), uma linha por (mensagem, nome,
   método), com evidência em JSON. Não altera `posts.author_id`. Recalcule com
   `python -m gmbr_scraper guess-authors`. `user_id`/`user_link` ligam o nome a
-  uma conta, decidido só por citação ou edição confirmada: `conta` (já existia na data da
+  uma conta, decidido só por citação ou edição: `conta` (já existia na data da
   mensagem) ou `recadastro` (a única conta com o nome foi criada depois — a
   pessoa voltou com conta nova após a antiga ser apagada). Métodos:
 
   | Método | Confiança | Pista |
   |---|---|---|
   | `citacao` | alta | resposta posterior cita o texto como "X escreveu:" |
-  | `edicao` | média se outra pista aponta a mesma pessoa; senão baixa | "Última edição por X" — a linha guarda o nome como texto (nick da época, mesmo de conta apagada), enquanto o autor vira "Convidad". Descartada se X moderava na época (editou mensagem de outro membro a até 60 dias; nicks antigos da conta e nomes da mesma pessoa não contam) ou contradiz uma citação |
+  | `edicao` | média (0.7 se outra pista aponta a mesma pessoa; 0.6 sozinha) | "Última edição por X" — a linha guarda o nome como texto (nick da época, mesmo de conta apagada), enquanto o autor vira "Convidad". Descartada se X moderava na época (editou mensagem de outro membro a até 60 dias; nicks antigos da conta e nomes da mesma pessoa não contam) ou contradiz uma citação |
   | `mencao` | baixa | a resposta seguinte chama X pelo nome (~65% de acerto medido contra citação/edição) |
-  | `continuidade` | baixa | outra mensagem de convidado do tópico foi atribuída a X (~30%) |
-  | `periodo` | baixa | só se não há outra pista: até 3 nomes identificados (citação/edição confirmada) em mensagens de convidado de ±15 dias, em outros tópicos, peso dobrado no mesmo fórum; exclui quem já tinha conta na data. 1º candidato acerta ~57%, um dos 3 ~87% (validado escondendo citações conhecidas) |
+  | `continuidade` | baixa | outra mensagem de convidado do tópico foi atribuída (citação/edição) a X (~30%) |
+  | `periodo` | baixa | só se não há outra pista: até 3 nomes identificados (citação/edição) em mensagens de convidado de ±15 dias, em outros tópicos, peso dobrado no mesmo fórum; exclui quem já tinha conta na data. 1º candidato acerta ~57%, um dos 3 ~87% (validado escondendo citações conhecidas) |
 
 Todas as relações têm chave estrangeira (verificada no commit).
 

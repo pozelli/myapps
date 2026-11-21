@@ -10,8 +10,9 @@ Métodos (score = confiança aproximada):
 * citacao     (0.9, alta)  — uma mensagem posterior do mesmo tópico cita o
                              texto desta como "X escreveu:".
 * edicao      (0.7, média) — "Última edição por X", confirmada por outra pista
-             (0.5, baixa)    (citação, menção ou continuidade) da mesma pessoa;
-                             sozinha vale 0.5. A linha de edição guarda o nome
+             (0.6, média)    (citação, menção ou continuidade) da mesma pessoa;
+                             sozinha vale 0.6 (85% das edições em mensagens com
+                             autor conhecido são do próprio autor). A linha de edição guarda o nome
                              como texto (nicks antigos, contas apagadas), enquanto
                              o autor é resolvido pela conta — por isso ela ainda
                              mostra quem era. Fica de fora a edição feita quando
@@ -25,10 +26,10 @@ Métodos (score = confiança aproximada):
                              (ou com @), e esse nome não é de ninguém que
                              escreveu ali perto.
 * continuidade(0.3, baixa) — outra mensagem de convidado do mesmo tópico foi
-                             atribuída por citação a um único nome.
+                             atribuída (por citação ou edição) a uma única pessoa.
 
 * periodo     (≤0.25, baixa) — só para mensagens sem outra pista: quem foi
-                             identificado (citação/edição confirmada) em
+                             identificado (citação/edição) em
                              mensagens de convidado de ±15 dias, com peso dobrado
                              no mesmo fórum e excluindo o próprio tópico. Até 3
                              candidatos, score = 0.25 × fatia do candidato.
@@ -36,7 +37,7 @@ Métodos (score = confiança aproximada):
                              Validação (escondendo citações conhecidas): o 1º
                              candidato acerta ~57%, um dos 3 ~87%.
 
-O user_id de cada nome é decidido só por citação ou edição confirmada: "conta" se a
+O user_id de cada nome é decidido só por citação ou edição: "conta" se a
 conta já existia na data da mensagem, "recadastro" se a única conta com esse
 nome foi criada depois (a pessoa voltou após ter a conta apagada).
 """
@@ -57,7 +58,7 @@ SCORES = {"citacao": 0.9, "edicao": 0.7, "mencao": 0.4, "continuidade": 0.3,
           "periodo": 0.25}  # periodo: multiplicado pela fatia do candidato
 PERIOD_DAYS = 15      # janela: ±15 dias (≈ 1 mês)
 PERIOD_TOP = 3        # candidatos por mensagem
-EDIT_ALONE_SCORE = 0.5
+EDIT_ALONE_SCORE = 0.6  # edição sem outra pista: média, abaixo da confirmada
 MOD_WINDOW_DAYS = 60
 CONFIDENCE = {"citacao": "alta", "edicao": "média", "mencao": "baixa",
               "continuidade": "baixa", "periodo": "baixa"}
@@ -217,10 +218,10 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     if conflicting:
         log.info("Editores descartados por contradizer citações: %s", sorted(conflicting))
 
-    # Camada de contexto (parte só das citações)
+    # Camada de contexto (parte das citações e edições)
     strong: dict[int, set] = defaultdict(set)
     for post_id, name, method, _, _ in rows:
-        if method == "citacao":
+        if method in ("citacao", "edicao"):
             strong[post_id].add(name)
     known_names = {n for n in quote_names | set(by_name) | {r[1] for r in rows}
                    if len(n) >= 4 and not n.startswith("Convidad")
@@ -288,11 +289,11 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     for _uid, n, j in members:
         if j and (n not in first_join or j < first_join[n]):
             first_join[n] = j
-    rows += _period_rows(conn, rows, edit_confirmed, first_join, pk)
+    rows += _period_rows(conn, rows, first_join, pk)
 
     name_user: dict[str, int | None] = {}
     for post_id, name, method, evidence, date in rows:
-        if not (method == "citacao" or (method == "edicao" and edit_confirmed(post_id, name))):
+        if method not in ("citacao", "edicao"):
             continue
         uid = user_for(name, date)
         if uid is None:
@@ -321,7 +322,7 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
                 evidence = {**evidence, "conta_criada_em": j}
         conf, score = CONFIDENCE[method], SCORES[method]
         if method == "edicao" and not edit_confirmed(post_id, name):
-            conf, score = "baixa", EDIT_ALONE_SCORE
+            score = EDIT_ALONE_SCORE
         elif method == "periodo":
             score = round(score * evidence["fatia"], 3)
         out.append((post_id, name, person_of.get(name), uid, link, method, conf, score,
@@ -340,7 +341,7 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     return dict(stats)
 
 
-def _period_rows(conn: sqlite3.Connection, rows: list, edit_confirmed,
+def _period_rows(conn: sqlite3.Connection, rows: list,
                  first_join: dict[str, str], pk) -> list:
     """Candidatos por atividade no mesmo período (veja o docstring do módulo).
 
@@ -357,8 +358,7 @@ def _period_rows(conn: sqlite3.Connection, rows: list, edit_confirmed,
               AND p.date IS NOT NULL""")}
     ident = sorted({(datetime.fromisoformat(info[pid][0]), name, info[pid][1], info[pid][2])
                     for pid, name, method, _, _ in rows if pid in info
-                    and (method == "citacao" or (method == "edicao"
-                                                 and edit_confirmed(pid, name)))})
+                    and method in ("citacao", "edicao")})
     when = [x[0] for x in ident]
     span = timedelta(days=PERIOD_DAYS)
     out = []
