@@ -159,9 +159,28 @@ CREATE TABLE IF NOT EXISTS person_names (
     name      TEXT PRIMARY KEY,  -- exatamente como aparece (autor, citação, edição)
     person_id INTEGER REFERENCES persons(id) ON DELETE CASCADE
                       DEFERRABLE INITIALLY DEFERRED,
-    certainty TEXT,              -- informado, provável
+    certainty TEXT,              -- informado, denúncia, variação, provável
     note      TEXT
 );
+
+-- Alegações, nas mensagens do fórum, de que nomes são da mesma pessoa
+-- ("X é fake do Y", "mesmo IP"), extraídas para revisão. Fonte das pessoas
+-- com certainty = 'denúncia'.
+CREATE TABLE IF NOT EXISTS identity_claims (
+    id       INTEGER PRIMARY KEY,
+    post_id  INTEGER REFERENCES posts(id) DEFERRABLE INITIALLY DEFERRED,
+    kind     TEXT,     -- confirma_staff, afirma, suspeita, nega
+    evidence TEXT,     -- IP, admissão, comportamento, outro
+    excerpt  TEXT,
+    source   TEXT      -- como foi extraída (ex.: leitura assistida)
+);
+
+CREATE TABLE IF NOT EXISTS identity_claim_names (
+    claim_id INTEGER REFERENCES identity_claims(id) ON DELETE CASCADE
+                     DEFERRABLE INITIALLY DEFERRED,
+    name     TEXT,
+    PRIMARY KEY (claim_id, name)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS post_author_guesses (
     post_id    INTEGER REFERENCES posts(id) ON DELETE CASCADE
@@ -211,6 +230,8 @@ CREATE INDEX IF NOT EXISTS idx_guesses_name     ON post_author_guesses(name);
 CREATE INDEX IF NOT EXISTS idx_guesses_user     ON post_author_guesses(user_id);
 CREATE INDEX IF NOT EXISTS idx_guesses_person   ON post_author_guesses(person_id);
 CREATE INDEX IF NOT EXISTS idx_person_names_p   ON person_names(person_id);
+CREATE INDEX IF NOT EXISTS idx_claim_names_name ON identity_claim_names(name);
+CREATE INDEX IF NOT EXISTS idx_claims_post      ON identity_claims(post_id);
 """
 
 # Views recriadas a cada abertura (DROP + CREATE), então mudanças aqui valem
