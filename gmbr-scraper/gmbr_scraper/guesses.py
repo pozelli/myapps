@@ -44,6 +44,17 @@ def _norm(s: str | None) -> str:
     return " ".join(_WORD.findall((s or "").lower()))
 
 
+def _own_text(html: str | None, text: str | None) -> str:
+    """Texto próprio da mensagem, sem as citações que ela faz (senão quem cita
+    esta mensagem parece estar citando o autor que ela citou)."""
+    if not html or "<blockquote" not in html:
+        return _norm(text)
+    soup = BeautifulSoup(html, "lxml")
+    for bq in soup.find_all("blockquote"):
+        bq.extract()
+    return _norm(soup.get_text(" "))
+
+
 def _quotes(html: str) -> list[tuple[str, str]]:
     """[(nome citado, texto citado normalizado)] de uma mensagem."""
     out = []
@@ -113,7 +124,7 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         per_topic[tid] = posts
         guests = [p for p in posts
                   if p[2] is None and (p[3] or "").startswith("Convidad")]
-        normed = {p[0]: _norm(p[4]) for p in guests}
+        normed = {p[0]: _own_text(p[5], p[4]) for p in guests}
         for p in posts:
             if not p[5] or "escreveu:" not in p[5]:
                 continue

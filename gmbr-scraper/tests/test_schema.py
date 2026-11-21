@@ -152,6 +152,13 @@ def test_v2_to_v3_and_guesses(tmp_path):
       (203, 20, 3, 'Convidad', NULL, '2010-01-01T13:00:00', 'Mais uma dúvida.', '', NULL,
        '[]'),
       (204, 20, 4, 'Carlos', 4, '2010-01-01T14:00:00', 'Zeca, abre outro tópico.', '',
+       NULL, '[]'),
+      (205, 20, 5, 'Convidad', NULL, '2010-01-01T15:00:00',
+       'Carlos escreveu: Zeca, abre outro tópico. Concordo.',
+       '<blockquote><cite>Carlos escreveu:</cite>Zeca, abre outro tópico.</blockquote>Ok.',
+       NULL, '[]'),
+      (206, 20, 6, 'Ana', 1, '2010-01-01T16:00:00', 'x',
+       '<blockquote><cite>Carlos escreveu:</cite>Zeca, abre outro tópico.</blockquote>Sim.',
        NULL, '[]');
     """)
     c.close()
@@ -163,9 +170,10 @@ def test_v2_to_v3_and_guesses(tmp_path):
     assert got == [(200, "Zeca", "citacao", "alta"),
                    (202, "Zeca", "edicao", "média"),
                    (203, "Zeca", "continuidade", "baixa"),
-                   (203, "Zeca", "mencao", "baixa")]
+                   (203, "Zeca", "mencao", "baixa"),
+                   (205, "Zeca", "continuidade", "baixa")]  # não "Carlos": era citação
     assert q("SELECT post_id, name, confidence, candidates FROM v_post_author_best "
              "WHERE post_id=203") == [(203, "Zeca", "baixa", 1)]
-    assert stats["mensagens"] == 3
+    assert stats["mensagens"] == 4
     assert q("SELECT author_id FROM posts WHERE id=200") == [(None,)]  # não altera
     db.close()
