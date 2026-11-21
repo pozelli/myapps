@@ -117,6 +117,14 @@ Tabelas:
   python -m gmbr_scraper person-add brendan Helloading Helloader --certainty provável
   python -m gmbr_scraper person-list
   ```
+- **identity_claims / identity_claim_names** — alegações nas mensagens de que
+  nomes são da mesma pessoa ("X é fake do Y", "mesmo IP", admissões, negações),
+  com tipo (`confirma_staff`, `afirma`, `suspeita`, `nega`), evidência e trecho.
+  `identity-groups` agrupa em pessoas (certeza `denúncia`) os pares ligados por
+  confirmação da equipe ou afirmação nos tópicos de denúncias; vale a alegação
+  mais recente de cada par (negação posterior desfaz, confirmação posterior
+  refaz). Apelidos que coincidem com contas de outras pessoas e contas criadas
+  depois da alegação não entram (`identity.NOT_ACCOUNT_NAMES`).
 - **post_author_guesses** — autores prováveis das mensagens de contas apagadas
   (exibidas como "Convidado"/"Convidad"), uma linha por (mensagem, nome,
   método), com evidência em JSON. Não altera `posts.author_id`. Recalcule com

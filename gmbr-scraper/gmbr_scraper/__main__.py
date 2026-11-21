@@ -254,6 +254,21 @@ def cmd_person_list(args):
     db.close()
 
 
+def cmd_identity(args):
+    """Carrega alegações (JSON) e/ou reagrupa pessoas a partir delas."""
+    from . import identity
+    from .guesses import build_guesses
+    db = Storage(args.db)
+    if args.load:
+        n = identity.load_claims(db.conn, identity.claims_from_files(args.load), args.source)
+        print(f"{n} alegações carregadas ({args.source})")
+    gs = identity.groups(db.conn)
+    done = identity.apply_groups(db.conn, gs)
+    print(f"{len(done)} grupos aplicados a pessoas")
+    build_guesses(db.conn)
+    db.close()
+
+
 def cmd_stats(args):
     db = Storage(args.db)
     q = lambda sql: db.conn.execute(sql).fetchone()[0]  # noqa: E731
@@ -350,6 +365,13 @@ def main(argv=None):
     pa.set_defaults(func=cmd_person_add)
     pl = sub.add_parser("person-list", help="lista as pessoas registradas")
     pl.set_defaults(func=cmd_person_list)
+
+    ic = sub.add_parser("identity-groups",
+                        help="agrupa em pessoas os nomes que as alegações do fórum ligam")
+    ic.add_argument("--load", nargs="*", help="arquivos JSON de alegações a carregar")
+    ic.add_argument("--source", default="leitura assistida",
+                    help="rótulo da origem das alegações carregadas")
+    ic.set_defaults(func=cmd_identity)
 
     ga = sub.add_parser("guess-authors",
                         help="recalcula sugestões de autor para mensagens de convidados")

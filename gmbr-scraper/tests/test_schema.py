@@ -292,3 +292,30 @@ def test_moderation_window_and_old_nicks(tmp_path):
         "SELECT post_id, name, confidence FROM post_author_guesses "
         "WHERE method='edicao' ORDER BY post_id")]
     assert got == [(2, "Mod", "média"), (5, "NomeVelho", "média")]
+
+
+def test_identity_claims_group_persons(tmp_path):
+    from gmbr_scraper import identity
+    db = Storage(str(tmp_path / "t.sqlite"))
+    db.upsert_topic_listing({"id": 5, "forum_id": 1, "replies": 3})
+    db.upsert_member({"user_id": 1, "name": "Mau"})
+    db.upsert_member({"user_id": 2, "name": "Mau_2"})
+    db.upsert_member({"user_id": 3, "name": "Irmao"})
+    db.upsert_member({"user_id": 9, "name": "Kevin"})  # outra pessoa
+    for pid, date in ((1, "2011-01-01"), (2, "2011-02-01"), (3, "2011-03-01"), (4, "2011-04-01")):
+        db.upsert_post({"id": pid, "topic_id": 5, "author_name": "Staff", "date": date + "T10:00:00"},
+                       0, pid)
+    db.commit()
+    claims = [
+        {"post_id": 1, "tipo": "confirma_staff", "nomes": ["Mau", "mau 2"], "trecho": "mesmo IP"},
+        {"post_id": 2, "tipo": "afirma", "nomes": ["Mau", "Irmao"], "trecho": "é fake"},
+        {"post_id": 3, "tipo": "nega", "nomes": ["Mau", "Irmao"], "trecho": "são irmãos"},
+        {"post_id": 4, "tipo": "suspeita", "nomes": ["Mau", "Kevin"], "trecho": "acho que é"},
+    ]
+    assert identity.load_claims(db.conn, claims, "teste") == 4
+    gs = identity.groups(db.conn)
+    assert gs == [{"Mau", "Mau_2"}]  # grafia unificada; negação posterior desfaz; suspeita não liga
+    identity.apply_groups(db.conn, gs)
+    assert [tuple(r) for r in db.conn.execute(
+        "SELECT name, certainty FROM person_names ORDER BY name")] == \
+        [("Mau", "denúncia"), ("Mau_2", "denúncia")]
