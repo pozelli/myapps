@@ -9,16 +9,20 @@ Métodos (score = confiança aproximada):
 
 * citacao     (0.9, alta)  — uma mensagem posterior do mesmo tópico cita o
                              texto desta como "X escreveu:".
-* edicao      (0.7, média) — "Última edição por X", quando X não costuma
-                             editar mensagens alheias (moderadores ficam fora).
+* edicao      (0.7, média) — "Última edição por X", confirmada por outra pista
+                             (citação, menção ou continuidade) com o mesmo nome. Sozinha vale
+             (0.5, baixa)    0.5: X pode ter sido moderador, inclusive com a
+                             conta apagada. Ficam de fora editores que editaram
+                             mensagens de outros membros ou mensagens que uma
+                             citação atribui a outra pessoa.
 * mencao      (0.4, baixa) — a resposta seguinte, de autor conhecido, chama
                              alguém pelo nome nos primeiros 200 caracteres
                              (ou com @), e esse nome não é de ninguém que
                              escreveu ali perto.
 * continuidade(0.3, baixa) — outra mensagem de convidado do mesmo tópico foi
-                             atribuída (por citação/edição) a um único nome.
+                             atribuída por citação a um único nome.
 
-O user_id de cada nome é decidido só pelas evidências fortes: "conta" se a
+O user_id de cada nome é decidido só por citação ou edição confirmada: "conta" se a
 conta já existia na data da mensagem, "recadastro" se a única conta com esse
 nome foi criada depois (a pessoa voltou após ter a conta apagada).
 """
@@ -35,7 +39,7 @@ from bs4 import BeautifulSoup
 log = logging.getLogger("gmbr.guesses")
 
 SCORES = {"citacao": 0.9, "edicao": 0.7, "mencao": 0.4, "continuidade": 0.3}
-STRONG = ("citacao", "edicao")
+EDIT_ALONE_SCORE = 0.5  # edição sem outra pista apontando o mesmo nome
 CONFIDENCE = {"citacao": "alta", "edicao": "média", "mencao": "baixa",
               "continuidade": "baixa"}
 GUEST_FILTER = "author_id IS NULL AND author_name LIKE 'Convidad%'"
@@ -107,7 +111,7 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
         m = _EDIT.match(info)
         if m and m.group(1) != author:
             editors[m.group(1)] += 1
-    moderators = {n for n, k in editors.items() if k >= 3}
+    moderators = set(editors)  # basta uma edição em mensagem alheia
 
     # Nomes que viram palavra comum no texto do fórum não servem para menção.
     word_freq: Counter = Counter()
@@ -146,10 +150,23 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
             if m and m.group(1) not in moderators and not m.group(1).startswith("Convidad"):
                 rows.append((g[0], m.group(1), "edicao", {"edit_info": g[6]}, g[7]))
 
-    # Camada de contexto
+    # Editor de mensagem que uma citação atribui a outra pessoa: provavelmente
+    # moderador (talvez já com a conta apagada) — nenhuma edição dele vale.
+    cited: dict[int, set] = defaultdict(set)
+    for post_id, name, method, _, _ in rows:
+        if method == "citacao":
+            cited[post_id].add(name)
+    conflicting = {name for post_id, name, method, _, _ in rows
+                   if method == "edicao" and cited.get(post_id) and name not in cited[post_id]}
+    rows = [r for r in rows if not (r[2] == "edicao" and r[1] in conflicting)]
+    if conflicting:
+        log.info("Editores descartados por contradizer citações: %s", sorted(conflicting))
+
+    # Camada de contexto (parte só das citações)
     strong: dict[int, set] = defaultdict(set)
     for post_id, name, method, _, _ in rows:
-        strong[post_id].add(name)
+        if method == "citacao":
+            strong[post_id].add(name)
     known_names = {n for n in quote_names | set(by_name) | {r[1] for r in rows}
                    if len(n) >= 4 and not n.startswith("Convidad")
                    and word_freq.get(n.lower(), 0) < max(20, total_posts * 0.002)}
@@ -204,9 +221,16 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
     #  conta      — a conta de mesmo nome já existia na data da mensagem
     #  recadastro — a única conta com esse nome foi criada DEPOIS da mensagem:
     #               a pessoa voltou com conta nova depois de a antiga ser apagada
+    names_by_post: dict[int, Counter] = defaultdict(Counter)
+    for post_id, name, method, _, _ in rows:
+        names_by_post[post_id][name] += 1
+
+    def edit_confirmed(post_id: int, name: str) -> bool:
+        return names_by_post[post_id][name] > 1  # outra pista, mesmo nome
+
     name_user: dict[str, int | None] = {}
     for post_id, name, method, evidence, date in rows:
-        if method not in STRONG:
+        if not (method == "citacao" or (method == "edicao" and edit_confirmed(post_id, name))):
             continue
         uid = user_for(name, date)
         if uid is None:
@@ -233,8 +257,11 @@ def build_guesses(conn: sqlite3.Connection) -> dict:
             link = "conta" if (not j or not date or j <= date[:10]) else "recadastro"
             if link == "recadastro":
                 evidence = {**evidence, "conta_criada_em": j}
-        out.append((post_id, name, uid, link, method, CONFIDENCE[method],
-                    SCORES[method], json.dumps(evidence, ensure_ascii=False)))
+        conf, score = CONFIDENCE[method], SCORES[method]
+        if method == "edicao" and not edit_confirmed(post_id, name):
+            conf, score = "baixa", EDIT_ALONE_SCORE
+        out.append((post_id, name, uid, link, method, conf, score,
+                    json.dumps(evidence, ensure_ascii=False)))
     conn.executemany(
         "INSERT INTO post_author_guesses (post_id, name, user_id, user_link, method, "
         "confidence, score, evidence) VALUES (?,?,?,?,?,?,?,?)", out)

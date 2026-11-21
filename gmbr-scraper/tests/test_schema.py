@@ -171,7 +171,8 @@ def test_guesses(tmp_path):
             "FROM post_author_guesses ORDER BY post_id, method")
     rec = (5, "recadastro")  # conta "Zeca" criada depois das mensagens
     assert got == [(200, "Zeca", "citacao", "alta", *rec),
-                   (202, "Zeca", "edicao", "média", *rec),
+                   (202, "Zeca", "continuidade", "baixa", *rec),
+                   (202, "Zeca", "edicao", "média", *rec),  # confirmada pela continuidade
                    (203, "Zeca", "continuidade", "baixa", *rec),
                    (203, "Zeca", "mencao", "baixa", *rec),
                    (205, "Zeca", "continuidade", "baixa", *rec)]  # não "Carlos": era citação
@@ -180,3 +181,29 @@ def test_guesses(tmp_path):
     assert stats["mensagens"] == 4
     assert q("SELECT author_id FROM posts WHERE id=200") == [(None,)]  # não altera
     db.close()
+
+
+def test_edit_by_moderator_is_discarded(tmp_path):
+    """Editor que contradiz uma citação (provável moderador) não vale; edição
+    sozinha fica com confiança baixa."""
+    from gmbr_scraper.guesses import build_guesses
+    db = Storage(str(tmp_path / "t.sqlite"))
+    db.upsert_topic_listing({"id": 1, "forum_id": 1, "replies": 3})
+    edit = "Última edição por {} em Sex 01 Jan 2010, 12:30, editado 1 vez(es)"
+    for pid, pos, author, text, html, info in [
+        (1, 0, "Convidad", "Pergunta longa sobre colisões no jogo de plataforma", "",
+         edit.format("Mod")),
+        (2, 1, "Convidad", "Outra pergunta sem relação nenhuma aqui", "", edit.format("Mod")),
+        (3, 2, "Convidad", "Texto qualquer de alguém que ninguém citou", "",
+         edit.format("Solo")),
+        (4, 3, "Ana", "r", "<blockquote><cite>Beto escreveu:</cite>Pergunta longa sobre "
+         "colisões no jogo de plataforma</blockquote>ok", None)]:
+        db.upsert_post({"id": pid, "topic_id": 1, "author_name": author, "content_text": text,
+                        "content_html": html, "edit_info": info,
+                        "date": "2010-01-01T10:00:00"}, 0, pos)
+    db.commit()
+    build_guesses(db.conn)
+    got = [tuple(r) for r in db.conn.execute(
+        "SELECT post_id, name, method, confidence FROM post_author_guesses "
+        "WHERE method IN ('citacao', 'edicao') ORDER BY post_id")]
+    assert got == [(1, "Beto", "citacao", "alta"), (3, "Solo", "edicao", "baixa")]

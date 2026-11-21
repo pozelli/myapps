@@ -110,14 +110,14 @@ Tabelas:
   (exibidas como "Convidado"/"Convidad"), uma linha por (mensagem, nome,
   método), com evidência em JSON. Não altera `posts.author_id`. Recalcule com
   `python -m gmbr_scraper guess-authors`. `user_id`/`user_link` ligam o nome a
-  uma conta, decidido só por citação/edição: `conta` (já existia na data da
+  uma conta, decidido só por citação ou edição confirmada: `conta` (já existia na data da
   mensagem) ou `recadastro` (a única conta com o nome foi criada depois — a
   pessoa voltou com conta nova após a antiga ser apagada). Métodos:
 
   | Método | Confiança | Pista |
   |---|---|---|
   | `citacao` | alta | resposta posterior cita o texto como "X escreveu:" |
-  | `edicao` | média | "Última edição por X" (X não edita mensagens alheias) |
+  | `edicao` | média se outra pista aponta o mesmo nome; senão baixa | "Última edição por X" — X pode ter sido moderador (conta apagada), então editores que editaram mensagem de outro membro ou que contradizem uma citação são descartados |
   | `mencao` | baixa | a resposta seguinte chama X pelo nome (~65% de acerto medido contra citação/edição) |
   | `continuidade` | baixa | outra mensagem de convidado do tópico foi atribuída a X (~30%) |
 
